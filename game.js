@@ -47,6 +47,7 @@ function looksOf(name) {
   return {
     ears: EARS[h % EARS.length],
     tail: ((h >>> 3) % 3) === 0,
+    tailStripes: ((h >>> 21) % 2) === 0,   // 꼬리가 있는 아이 중 절반은 줄무늬
     spots: ((h >>> 7) % 4) === 0,
     mouth: MOUTHS[(h >>> 11) % MOUTHS.length],
     wink: ((h >>> 17) % 4) === 0,
@@ -961,15 +962,48 @@ class RaceGame {
     const L = R.look;
     const dark = `hsl(${R.hue},70%,42%)`;
 
-    // 꼬리 (몸 뒤에서 살랑거린다)
+    // 꼬리 (엉덩이에서 뒤로 뻗어 끝이 살짝 들리고, 물결치듯 살랑거린다)
     if (L.tail) {
-      const wag = Math.sin(R.bob * 1.7) * r * 0.4;
-      c.strokeStyle = dark;
-      c.lineWidth = r * 0.3; c.lineCap = 'round';
+      const N = 10, len = r * 1.75, ph = R.bob * 1.7;
+      const pts = [];
+      for (let i = 0; i <= N; i++) {
+        const t = i / N;
+        const sway = Math.sin(ph - t * 2.4) * r * 0.34 * Math.pow(t, 1.5); // 끝으로 갈수록 크게, 늦게 흔들린다
+        pts.push({
+          x: sx - r * 0.7 - len * t,
+          y: y + r * 0.3 + r * (0.2 * Math.sin(t * Math.PI * 0.9) - 0.55 * t * t) + sway,
+          w: r * (0.15 + 0.03 * (1 - t) * (1 - t)),                           // 굵기는 거의 고르게
+        });
+      }
+      const side = [[], []];
+      pts.forEach((p, i) => {
+        const a = pts[Math.max(0, i - 1)], b = pts[Math.min(N, i + 1)];
+        const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+        side[0].push([p.x - dy / d * p.w, p.y + dx / d * p.w]);
+        side[1].push([p.x + dy / d * p.w, p.y - dx / d * p.w]);
+      });
+      c.fillStyle = dark;
       c.beginPath();
-      c.moveTo(sx - r * 0.75, y + r * 0.25);
-      c.quadraticCurveTo(sx - r * 1.8, y + r * 0.2 + wag, sx - r * 1.45, y - r * 0.55 + wag);
-      c.stroke();
+      side[0].forEach(([px, py], i) => (i ? c.lineTo(px, py) : c.moveTo(px, py)));
+      const tip = pts[N], th = Math.atan2(tip.y - pts[N - 1].y, tip.x - pts[N - 1].x);
+      c.arc(tip.x, tip.y, tip.w, th + Math.PI / 2, th - Math.PI / 2, true);    // 끝은 둥글게 (U자를 눕힌 모양)
+      for (let i = N; i >= 0; i--) c.lineTo(side[1][i][0], side[1][i][1]);
+      c.closePath(); c.fill();
+      // 줄무늬 (꼬리 모양 안쪽으로만 칠한다)
+      if (L.tailStripes) {
+        c.save();
+        c.clip();
+        c.strokeStyle = `hsl(${R.hue},85%,78%)`;
+        c.lineWidth = r * 0.16; c.lineCap = 'butt';
+        c.beginPath();
+        for (const i of [3, 5, 7, 9]) {
+          const [ax, ay] = side[0][i], [bx, by] = side[1][i];
+          const ex = (bx - ax) * 0.6, ey = (by - ay) * 0.6;
+          c.moveTo(ax - ex, ay - ey); c.lineTo(bx + ex, by + ey);
+        }
+        c.stroke();
+        c.restore();
+      }
     }
 
     // 귀 (몸 뒤에 먼저 그린다)
@@ -983,10 +1017,12 @@ class RaceGame {
           c.fill();
         }
       } else if (panda) {
+        c.strokeStyle = '#fff';                        // 짙은 배경에 묻히지 않게 흰 테두리
+        c.lineWidth = Math.max(1.5, r * 0.1);
         for (const s of [-1, 1]) {
           c.beginPath();
           c.arc(sx + s * r * 0.72, y - r * 0.82, r * 0.42, 0, Math.PI * 2);
-          c.fill();
+          c.fill(); c.stroke();
         }
       } else {
         const tall = L.ears === 'fox' ? 1.85 : 1.35;   // 여우 귀가 더 길다
