@@ -21,6 +21,7 @@ const el = {
   confetti: $('confetti'),
   winMeta: $('win-meta'), winName: $('win-name'), winSub: $('win-sub'),
   btnAgain: $('btn-again'), btnHome: $('btn-home'),
+  sndPick: $('snd-pick'), sndRace: $('snd-race'),
 };
 
 let roster = null;        // { fetchedAt, grades:[...] }
@@ -28,6 +29,19 @@ let selGrade = null;
 let selClass = null;
 let game = null;
 let busy = false;
+
+/* ---------- 소리 ---------- */
+function renderSound() {
+  el.sndPick.textContent = Sound.on ? '🔊 소리 켜짐' : '🔇 소리 꺼짐';
+  el.sndPick.classList.toggle('off', !Sound.on);
+  el.sndRace.textContent = Sound.on ? '🔊' : '🔇';
+}
+
+function toggleSound() {
+  Sound.setOn(!Sound.on);
+  renderSound();
+  if (Sound.on) Sound.play('countdown');   // 켰으면 들려 준다
+}
 
 /* ---------- 화면 전환 ---------- */
 function show(which) {
@@ -122,6 +136,7 @@ function escapeHtml(s) {
 /* ---------- 레이스 시작 ---------- */
 async function startRace() {
   if (busy || selGrade === null || selClass === null) return;
+  Sound.resume();          // 브라우저는 누른 직후에만 소리를 허락한다
   busy = true;
   const label = el.btnStart.textContent;
   el.btnStart.textContent = '최신 명단 확인 중…';
@@ -162,8 +177,10 @@ function runGame(cls) {
 
   if (!game) {
     game = new RaceGame(el.stage, {
+      onSfx(name) { Sound.play(name); },
       onCountdown(text) {
         if (text === null) { el.countdown.hidden = true; return; }
+        Sound.play(text === '출발!' ? 'go' : 'countdown');
         el.countdown.hidden = false;
         const span = el.countdown.firstElementChild;
         span.textContent = text;
@@ -173,6 +190,7 @@ function runGame(cls) {
         span.style.animation = '';
       },
       onStage(text, n) {
+        if (n && n > 1) Sound.play('stage');
         if (n) el.hudLap.textContent = '구간 ' + n;
         el.banner.textContent = text;
         el.banner.classList.remove('show');
@@ -180,6 +198,7 @@ function runGame(cls) {
         el.banner.classList.add('show');
       },
       onEliminate(R, alive) {
+        Sound.play('out');
         el.hudAlive.textContent = alive;
         const d = document.createElement('div');
         d.textContent = `${R.name} 탈락`;
@@ -206,6 +225,7 @@ function showWin(R, order, cls) {
   el.winName.textContent = R.name;
   el.winSub.textContent = `${cls.members.length}명 중 마지막까지 살아남았습니다`;
   show('win');
+  Sound.play('win');
   confettiRun();
 }
 
@@ -249,8 +269,12 @@ function confettiStop() { cancelAnimationFrame(confettiRaf); confettiRaf = 0; }
 /* ---------- 버튼 ---------- */
 el.btnRetry.onclick = boot;
 el.btnStart.onclick = startRace;
+el.sndPick.onclick = toggleSound;
+el.sndRace.onclick = toggleSound;
 el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; show('pick'); };
 el.btnAgain.onclick = () => { confettiStop(); startRace(); };
 el.btnHome.onclick = () => { confettiStop(); show('pick'); };
 
+Sound.load();
+renderSound();
 boot();

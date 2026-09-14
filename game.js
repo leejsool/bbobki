@@ -284,7 +284,7 @@ class RaceGame {
       /* 점프: 낮은 장애물이 코앞이면 배짱껏 뛰어넘는다 */
       if (R.jump > 0) {
         R.jump -= dt;
-        if (R.jump <= 0) { R.jump = 0; this.puff(R, 0.8); }   // 착지 먼지
+        if (R.jump <= 0) { R.jump = 0; this.puff(R, 0.8); this.sfx('land'); }
       } else {
         if (R.jumpCd > 0) R.jumpCd -= dt;
         if (R.jumpCd <= 0) {
@@ -295,6 +295,7 @@ class RaceGame {
               R.jump = R.jumpT;
               R.jumpCd = rnd(0.55, 1.05);
               this.puff(R, 1);                                // 도약 먼지 + 링
+              this.sfx('jump');
             } else {
               R.jumpCd = 0.35;              // 머뭇거렸다
             }
@@ -418,6 +419,7 @@ class RaceGame {
     this.lastElimAt = this.time;
     this.order.unshift(R);
     this.burst(R.x, R.y, R.hue, 16);
+    if (this.alive === 3) this.sfx('final');      // 셋 남으면 긴장감
     if (this.opts.onEliminate) this.opts.onEliminate(R, this.alive);
   }
 
@@ -528,6 +530,7 @@ class RaceGame {
         o.t += dt;
         if (!o.landed && o.t >= o.warn + o.fall) {
           o.landed = true;
+          this.sfx('boom');
           this.burst(o.x, o.y, o.hue, 18);
           this.rings.push({ x: o.x, y: o.y, age: 0, life: 0.5, hue: o.hue, r0: o.rad });
         }
@@ -643,9 +646,15 @@ class RaceGame {
     return null;
   }
 
+  /** 소리 한 번 (실제로 내는 일은 바깥에 맡긴다) */
+  sfx(name) {
+    if (this.opts.onSfx) this.opts.onSfx(name);
+  }
+
   /** 주먹 한 방. 닿는 범위 안의 아이들을 바깥으로 밀어낸다 (탈락은 아니다) */
   shove(P) {
     const reach = this.r * 6;
+    this.sfx('punch');
     this.rings.push({ x: P.x + this.r, y: P.y, age: 0, life: 0.42, hue: 48, r0: this.r * 1.1 });
     this.burst(P.x + this.r * 1.2, P.y, 48, 12);
     for (const O of this.runners) {

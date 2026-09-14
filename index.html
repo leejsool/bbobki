@@ -42,6 +42,7 @@
     </div>
 
     <button id="btn-start" class="btn-go" disabled>레이스 시작</button>
+    <button id="snd-pick" class="btn-snd">🔊 소리 켜짐</button>
     <p class="fetch-note">
       시작을 누르면 시트를 <b>다시 읽어</b> 최신 명단으로 달립니다.
       <span id="fetched-at"></span>
@@ -65,6 +66,7 @@
     </div>
     <div class="hud-right">
       <span id="hud-lap" class="hud-lap">구간 1</span>
+      <button id="snd-race" class="btn-quit" title="소리 켜기/끄기">🔊</button>
       <button id="btn-quit" class="btn-quit" title="그만두기">✕</button>
     </div>
   </div>
@@ -90,6 +92,7 @@
   </div>
 </section>
 
+<script src="sound.js"></script>
 <script src="sheet.js"></script>
 <script src="game.js"></script>
 <script src="app.js"></script>
