@@ -115,6 +115,7 @@ class RaceGame {
     this.lastElimAt = 0;
     this.finishedAt = 0;
     this.winner = null;
+    this._told = false;        // 이걸 안 지우면 두 번째 판이 끝나지 않는다
     this.particles = [];
     this.rings = [];
     this.obstacles = [];
@@ -158,6 +159,9 @@ class RaceGame {
         dash: 0, dashCd: rnd(0.6, 3),      // 치고 나가기
         jump: 0, jumpT: 0.5, jumpCd: 0,    // 뛰어넘기
         nerve: rnd(0.3, 0.95),             // 점프를 시도하는 배짱
+        punch: 0, punchT: 0.4,             // 주먹 휘두르기
+        punchCd: rnd(1.5, 5), punchHit: false,
+        kx: 0, ky: 0,                      // 주먹에 맞아 밀려나는 힘
       };
     });
     this.runners.forEach((r) => { r.targetY = r.y; });
@@ -298,6 +302,27 @@ class RaceGame {
         }
       }
 
+      /* 주먹: 너무 뭉치면 한 명이 휘둘러 주변을 흩뿌린다 */
+      if (R.punch > 0) {
+        R.punch -= dt;
+        if (!R.punchHit && R.punch <= R.punchT * 0.5) { R.punchHit = true; this.shove(R); }
+      } else if (R.jump <= 0) {
+        R.punchCd -= dt;
+        if (R.punchCd <= 0) {
+          let near = 0;
+          for (const O of this.runners) {
+            if (O === R || !O.alive) continue;
+            if (Math.abs(O.x - R.x) < this.r * 3 && Math.abs(O.y - R.y) < this.r * 3) near++;
+          }
+          if (near >= 3 && Math.random() < (0.02 + near * 0.015) * dt) {
+            R.punchT = rnd(0.34, 0.46);
+            R.punch = R.punchT;
+            R.punchHit = false;
+            R.punchCd = rnd(6, 12);
+          }
+        }
+      }
+
       /* 대쉬: 뒤처져 있을수록 자주 터진다 */
       if (R.dash > 0) {
         R.dash -= dt;
@@ -335,6 +360,16 @@ class RaceGame {
       R.x += sp * dt;
       R.bob += dt * (7 + sp * 0.02);
       if (R.dash > 0 && Math.random() < 0.5) this.trail(R);
+
+      // 주먹에 맞아 밀려나는 힘 (AI 조종과 별개로 더해진다)
+      if (R.kx || R.ky) {
+        R.x += R.kx * dt;
+        R.y = clamp(R.y + R.ky * dt, this.top + this.r, this.bot - this.r);
+        const damp = Math.pow(0.015, dt);
+        R.kx *= damp; R.ky *= damp;
+        if (Math.abs(R.kx) < 2) R.kx = 0;
+        if (Math.abs(R.ky) < 2) R.ky = 0;
+      }
 
       // 충돌 (공중이면 낮은 장애물은 넘어간다. 벽과 해머는 못 넘는다)
       for (const o of this.obstacles) {
@@ -606,6 +641,24 @@ class RaceGame {
       if (this.danger(o, R.y, Math.max(0, dx / 280)) > 0.40) return o.kind;
     }
     return null;
+  }
+
+  /** 주먹 한 방. 닿는 범위 안의 아이들을 바깥으로 밀어낸다 (탈락은 아니다) */
+  shove(P) {
+    const reach = this.r * 6;
+    this.rings.push({ x: P.x + this.r, y: P.y, age: 0, life: 0.42, hue: 48, r0: this.r * 1.1 });
+    this.burst(P.x + this.r * 1.2, P.y, 48, 12);
+    for (const O of this.runners) {
+      if (O === P || !O.alive) continue;
+      let dx = O.x - P.x, dy = O.y - P.y;
+      const d = Math.hypot(dx, dy);
+      if (d > reach) continue;
+      if (d < 0.001) { dx = 1; dy = 0; }
+      const f = (1 - d / reach) * 1050;
+      O.kx += (dx / (d || 1)) * f * 0.5;
+      O.ky += (dy / (d || 1)) * f;
+      O.stun = Math.max(O.stun, 0.2);
+    }
   }
 
   /* ===== 파티클 ===== */
@@ -996,6 +1049,19 @@ class RaceGame {
       c.fill();
     }
 
+    // 휘두르는 팔
+    if (!ghost && R.punch > 0) {
+      const k = 1 - R.punch / R.punchT;                 // 0 -> 1
+      const ang = -1.15 + k * 2.3;
+      const len = r * (1.05 + Math.sin(k * Math.PI) * 1.15);
+      const ax = sx + Math.cos(ang) * len, ay = y + Math.sin(ang) * len;
+      c.strokeStyle = dark;
+      c.lineWidth = r * 0.36; c.lineCap = 'round';
+      c.beginPath(); c.moveTo(sx, y + r * 0.1); c.lineTo(ax, ay); c.stroke();
+      c.fillStyle = `hsl(${R.hue},95%,66%)`;
+      c.beginPath(); c.arc(ax, ay, r * 0.44, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.5; c.stroke();
+    }
   }
 
   /**
