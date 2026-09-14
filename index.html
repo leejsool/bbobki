@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>생존 레이스 뽑기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jua&family=Gothic+A1:wght@500;700;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ====================== 1. 반 고르기 ====================== -->
+<section id="screen-pick" class="screen is-on">
+  <header class="top">
+    <h1>생존 레이스 뽑기</h1>
+    <p class="sub">달리다 부딪히면 탈락. 끝까지 남은 <b>한 명</b>이 당첨.</p>
+  </header>
+
+  <div id="load-state" class="load-state">
+    <div class="spinner"></div>
+    <p>구글 시트에서 명단을 읽는 중…</p>
+  </div>
+
+  <div id="pick-body" class="pick-body" hidden>
+    <div class="pick-block">
+      <h2>학년</h2>
+      <div id="grade-row" class="chip-row"></div>
+    </div>
+    <div class="pick-block">
+      <h2>반</h2>
+      <div id="class-row" class="chip-row"></div>
+    </div>
+
+    <div id="roster-box" class="roster-box" hidden>
+      <div class="roster-head">
+        <span id="roster-title">—</span>
+        <span id="roster-count" class="count">0명</span>
+      </div>
+      <ol id="roster-list" class="roster-list"></ol>
+    </div>
+
+    <button id="btn-start" class="btn-go" disabled>레이스 시작</button>
+    <p class="fetch-note">
+      시작을 누르면 시트를 <b>다시 읽어</b> 최신 명단으로 달립니다.
+      <span id="fetched-at"></span>
+    </p>
+  </div>
+
+  <div id="load-error" class="load-error" hidden>
+    <p id="load-error-msg"></p>
+    <button id="btn-retry" class="btn-sub">다시 시도</button>
+  </div>
+</section>
+
+<!-- ====================== 2. 레이스 ====================== -->
+<section id="screen-race" class="screen">
+  <canvas id="stage"></canvas>
+
+  <div class="hud">
+    <div class="hud-left">
+      <span id="hud-class" class="hud-class">—</span>
+      <span id="hud-alive" class="hud-alive">0</span><span class="hud-unit">명 남음</span>
+    </div>
+    <div class="hud-right">
+      <span id="hud-lap" class="hud-lap">구간 1</span>
+      <button id="btn-quit" class="btn-quit" title="그만두기">✕</button>
+    </div>
+  </div>
+
+  <div id="kill-feed" class="kill-feed"></div>
+  <div id="stage-banner" class="stage-banner"></div>
+
+  <div id="countdown" class="countdown" hidden><span></span></div>
+</section>
+
+<!-- ====================== 3. 당첨 ====================== -->
+<section id="screen-win" class="screen">
+  <canvas id="confetti"></canvas>
+  <div class="win-card">
+    <p class="win-label">당첨</p>
+    <p id="win-meta" class="win-meta">—</p>
+    <p id="win-name" class="win-name">—</p>
+    <p id="win-sub" class="win-sub"></p>
+    <div class="win-actions">
+      <button id="btn-again" class="btn-go">같은 반 다시</button>
+      <button id="btn-home" class="btn-sub">반 다시 고르기</button>
+    </div>
+  </div>
+</section>
+
+<script src="sheet.js"></script>
+<script src="game.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
