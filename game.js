@@ -140,6 +140,7 @@ class RaceGame {
       const col = Math.floor(slot / per);
       const inCol = slot % per;
       return {
+        seq: i,                            // 이름표 자리 다툼을 푸는 고정 순서
         no: m.no,
         name: m.name,
         look: looksOf(m.name),
@@ -193,6 +194,7 @@ class RaceGame {
 
   update(dt) {
     this.time += dt;
+    this._dt = dt;
 
     if (this.phase === 'countdown') {
       const before = Math.ceil(this.cd);
@@ -996,35 +998,72 @@ class RaceGame {
 
   }
 
-  /** 이름표는 몸을 다 그린 뒤 한꺼번에. 겹치면 위로 밀어 올린다. */
+  /**
+   * 이름표는 몸을 다 그린 뒤 한꺼번에 그린다.
+   *
+   * 뭉쳐 있을 때 이름표가 정신없이 튀지 않도록 세 가지를 지킨다.
+   *  - 달릴 때의 통통거림(bob)은 빼고 지면 기준으로 붙인다.
+   *  - 자리 다툼은 늘 같은 순서(seq)로, 흔들리지 않는 '목표 위치'만 보고 푼다.
+   *  - 자리가 바뀌면 순간이동하지 않고 스르르 옮긴다.
+   */
   drawLabels(c, list) {
     const boxes = [];
     c.textAlign = 'center';
-    for (const R of list) {
+    const ease = 1 - Math.pow(0.002, this._dt || 1 / 60);
+    const ordered = list.slice().sort((a, b) => a.seq - b.seq);
+
+    for (const R of ordered) {
       const sx = R.x - this.camX;
       if (sx < -90 || sx > this.W + 90) continue;
       const r = this.r;
-      const air = R.jump > 0 ? Math.sin((1 - R.jump / R.jumpT) * Math.PI) : 0;
-      const hop = Math.abs(Math.sin(R.bob)) * r * 0.42 + air * r * 3.3;
       const big = this.phase === 'done' && R === this.winner;
       const fs = big ? Math.max(24, r * 1.5) : Math.max(13, r * 0.8);
-
       c.font = `700 ${fs}px Gothic A1, sans-serif`;
       const w = c.measureText(R.name).width;
-      let ty = R.y - hop - r - fs * 0.5;
-      for (let k = 0; k < 9; k++) {
-        const clash = boxes.some((b) =>
-          Math.abs(b.x - sx) < (b.w + w) / 2 + 5 && Math.abs(b.y - ty) < fs * 0.98);
-        if (!clash) break;
-        ty -= fs * 1.04;
+
+      // 점프는 완만한 곡선이라 따라가도 되지만, bob 은 너무 빨라 뺀다.
+      const air = R.jump > 0 ? Math.sin((1 - R.jump / R.jumpT) * Math.PI) : 0;
+      const headY = R.y - air * r * 3.3 - r;
+      const baseTy = headY - fs * 0.5;
+
+      // 빈 칸 찾기. 위로만 쌓으면 탑이 되므로 옆으로 비키는 쪽을 먼저 본다.
+      // 판단은 흔들리지 않는 '목표 위치'로만 한다.
+      const lane = w * 0.6 + 12;
+      let bestX = sx, bestY = baseTy, bestCost = Infinity;
+      for (let s = 0; s < 6; s++) {
+        for (const d of [0, 1, -1, 2, -2]) {
+          const cost = s + Math.abs(d) * 0.75;
+          if (cost >= bestCost) continue;
+          const x = sx + d * lane;
+          const y = baseTy - s * fs * 1.06;
+          const clash = boxes.some((b) =>
+            Math.abs(b.x - x) < (b.w + w) / 2 + 5 && Math.abs(b.y - y) < fs * 0.98);
+          if (!clash) { bestCost = cost; bestX = x; bestY = y; }
+        }
       }
-      boxes.push({ x: sx, y: ty, w });
+      boxes.push({ x: bestX, y: bestY, w });
+
+      // 실제로 그리는 자리는 부드럽게 따라간다
+      if (R.labelOX === undefined) { R.labelOX = bestX - sx; R.labelOY = bestY - baseTy; }
+      R.labelOX += (bestX - sx - R.labelOX) * ease;
+      R.labelOY += (bestY - baseTy - R.labelOY) * ease;
+      const lx = sx + R.labelOX, ly = baseTy + R.labelOY;
+
+      // 몸에서 떨어졌으면 가는 선으로 이어 준다
+      if (headY - ly > fs * 1.15 || Math.abs(R.labelOX) > w * 0.3) {
+        c.strokeStyle = `hsla(${R.hue},90%,72%,.5)`;
+        c.lineWidth = Math.max(1, r * 0.07);
+        c.beginPath();
+        c.moveTo(lx, ly + fs * 0.22);
+        c.lineTo(sx, headY - r * 0.1);
+        c.stroke();
+      }
 
       c.lineWidth = Math.max(3, fs * 0.26);
       c.strokeStyle = 'rgba(6,9,20,.85)';
-      c.strokeText(R.name, sx, ty);
+      c.strokeText(R.name, lx, ly);
       c.fillStyle = big ? '#ffd23f' : '#fff';
-      c.fillText(R.name, sx, ty);
+      c.fillText(R.name, lx, ly);
     }
   }
 }
