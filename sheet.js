@@ -8,7 +8,7 @@
    ========================================================= */
 
 const SHEET = {
-  id: '1ia0TKaRP28DL_YUSnUTwA-rtEuWekpTT4TmcPi0z8Ck',
+  id: '1Ld2kdDc79NnfwsstlZagzibWqX0fMZpnIP8B77PNNA4',
   name: '전체 학생명단',
   range: 'A1:X32',
   timeout: 15000,
