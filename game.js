@@ -90,7 +90,10 @@ class RaceGame {
     const k = this.trackH / oldH;
     const map = (y) => this.top + (y - oldTop) * k;
     this.r = clamp(Math.min(this.trackH / 13, this.W / 40), 10, 30);
-    for (const R of this.runners) { R.y = map(R.y); R.targetY = map(R.targetY); R.vy *= k; }
+    for (const R of this.runners) {
+      R.y = map(R.y); R.targetY = map(R.targetY); R.vy *= k;
+      if (R.flight) { R.flight.sy = map(R.flight.sy); R.flight.ey = map(R.flight.ey); }
+    }
     for (const o of this.obstacles) {
       if (o.y !== undefined) o.y = map(o.y);
       if (o.y0 !== undefined) o.y0 = map(o.y0);
@@ -119,6 +122,9 @@ class RaceGame {
     this._told = false;        // 이걸 안 지우면 두 번째 판이 끝나지 않는다
     this.particles = [];
     this.rings = [];
+    this.pows = [];                        // 주먹 타격 표시 (퍽! 별 모양)
+    this.shake = 0;                        // 화면 흔들림 남은 시간
+    this.shakeAmp = 0;
     this.obstacles = [];
     this.dropCd = rnd(3, 6);
     this.frontier = 620;
@@ -152,17 +158,24 @@ class RaceGame {
         alive: true,
         hue: (i * 360) / n + rnd(-8, 8),
         speed: rnd(0.93, 1.09),            // 타고난 발 빠르기
-        skill: rnd(0.35, 1),               // 장애물 감지 능력
+        skill: rnd(0.74, 1),               // 장애물 감지 능력
         bob: rnd(0, Math.PI * 2),
         targetY: 0,
         think: rnd(0, 0.2),
         stun: 0,
         dash: 0, dashCd: rnd(0.6, 3),      // 치고 나가기
         jump: 0, jumpT: 0.5, jumpCd: 0,    // 뛰어넘기
-        nerve: rnd(0.3, 0.95),             // 점프를 시도하는 배짱
+        nerve: rnd(0.55, 1),               // 점프를 시도하는 배짱
         punch: 0, punchT: 0.4,             // 주먹 휘두르기
         punchCd: rnd(1.5, 5), punchHit: false,
         kx: 0, ky: 0,                      // 주먹에 맞아 밀려나는 힘
+        hurt: 0,                           // 맞은 직후 번쩍이는 시간
+        dizzy: 0, squash: 0, spin: 0,      // 기절 / 밟혀 납작 / 날아가며 도는 각도
+        jumpPow: 1,                        // 점프 높이 배율 (밟고 뛰면 커진다)
+        stomp: null,                       // 밟으러 내려앉는 중 { b, t, T }
+        carry: null, liftT: 0, liftDur: 0, // 들고 있는 아이
+        heldBy: null, flight: null,        // 들려 있다 / 던져져 날아가는 중
+        actCd: rnd(8, 20),                 // 밟기·던지기 쿨다운
       };
     });
     this.runners.forEach((r) => { r.targetY = r.y; });
@@ -262,7 +275,7 @@ class RaceGame {
             t: 0, warn: rnd(0.45, 0.8), fall: 0.28, live: 0.5, landed: false,
           });
         }
-        this.dropCd = rnd(2.2, 4.6) / (0.65 + heat);
+        this.dropCd = rnd(1.7, 3.4) / (0.65 + heat);
       }
     }
 
@@ -280,19 +293,38 @@ class RaceGame {
     for (const R of this.runners) {
       if (!R.alive) continue;
 
+      // 들려 있거나 날아가는 동안은 스스로 움직이지 못한다 (장애물에도 안 맞는다)
+      if (R.heldBy) continue;
+      if (R.flight) { this.stepFlight(R, dt); continue; }
+
       const lagRatio = clamp((leadX - R.x) / band, 0, 1);
+
+      // 기절: 비틀비틀 걷는다
+      const dizzy = R.dizzy > 0;
+      if (dizzy) {
+        R.dizzy -= dt;
+        R.y += Math.sin(this.time * 7 + R.bob) * 22 * dt;
+      }
+      if (R.squash > 0) R.squash -= dt;
 
       /* 점프: 낮은 장애물이 코앞이면 배짱껏 뛰어넘는다 */
       if (R.jump > 0) {
         R.jump -= dt;
-        if (R.jump <= 0) { R.jump = 0; this.puff(R, 0.8); this.sfx('land'); }
+        if (R.jump <= 0) {
+          R.jump = 0;
+          const big = R.jumpPow > 1;                      // 밟고 뛴 큰 점프의 착지
+          this.puff(R, big ? 1.4 : 0.8);
+          this.sfx('land');
+          R.jumpPow = 1;
+        }
       } else {
         if (R.jumpCd > 0) R.jumpCd -= dt;
-        if (R.jumpCd <= 0) {
+        if (R.jumpCd <= 0 && !dizzy && !R.carry && !R.stomp) {
           const threat = this.threat(R);
           if (threat && LOW.has(threat)) {
             if (Math.random() < R.nerve) {
               R.jumpT = rnd(0.55, 0.72);
+              R.jumpPow = 1;
               R.jump = R.jumpT;
               R.jumpCd = rnd(0.55, 1.05);
               this.puff(R, 1);                                // 도약 먼지 + 링
@@ -308,7 +340,7 @@ class RaceGame {
       if (R.punch > 0) {
         R.punch -= dt;
         if (!R.punchHit && R.punch <= R.punchT * 0.5) { R.punchHit = true; this.shove(R); }
-      } else if (R.jump <= 0) {
+      } else if (R.jump <= 0 && !dizzy && !R.carry && !R.stomp) {
         R.punchCd -= dt;
         if (R.punchCd <= 0) {
           let near = 0;
@@ -325,10 +357,13 @@ class RaceGame {
         }
       }
 
+      /* 밟기 / 들어서 던지기 */
+      this.stepActions(R, dt, dizzy);
+
       /* 대쉬: 뒤처져 있을수록 자주 터진다 */
       if (R.dash > 0) {
         R.dash -= dt;
-      } else {
+      } else if (!dizzy && !R.carry) {
         R.dashCd -= dt;
         if (R.dashCd <= 0) {
           const chance = (0.25 + lagRatio * 2.6) * dt;
@@ -340,15 +375,17 @@ class RaceGame {
         }
       }
 
-      R.think -= dt;
-      if (R.think <= 0) {
-        R.think = rnd(0.09, 0.2);
-        R.targetY = this.chooseY(R, baseSpeed);
+      if (!dizzy) {                                       // 기절하면 생각을 못 한다
+        R.think -= dt;
+        if (R.think <= 0) {
+          R.think = rnd(0.05, 0.12);
+          R.targetY = this.chooseY(R, baseSpeed);
+        }
       }
 
       // 세로 이동 (공중에서는 방향을 못 바꾼다)
       const dy = R.targetY - R.y;
-      const agility = (260 + 200 * R.skill) * (R.jump > 0 ? 0.25 : 1);
+      const agility = (360 + 280 * R.skill) * (R.jump > 0 ? 0.25 : 1) * (dizzy ? 0.25 : 1) * (R.carry ? 0.6 : 1);
       R.vy = lerp(R.vy, clamp(dy * 5, -agility, agility), 1 - Math.pow(0.002, dt));
       R.y = clamp(R.y + R.vy * dt, this.top + this.r, this.bot - this.r);
 
@@ -358,7 +395,9 @@ class RaceGame {
       const sp = baseSpeed * R.speed
         * (0.80 + lagRatio * 0.44)
         * (R.dash > 0 ? 1.85 : 1)
-        * (R.stun > 0 ? 0.35 : 1);
+        * (R.stun > 0 ? 0.35 : 1)
+        * (dizzy ? 0.4 : 1)                       // 비틀거린다
+        * (R.carry ? 0.5 : 1);                    // 들고 있으면 느리다
       R.x += sp * dt;
       R.bob += dt * (7 + sp * 0.02);
       if (R.dash > 0 && Math.random() < 0.5) this.trail(R);
@@ -371,7 +410,12 @@ class RaceGame {
         R.kx *= damp; R.ky *= damp;
         if (Math.abs(R.kx) < 2) R.kx = 0;
         if (Math.abs(R.ky) < 2) R.ky = 0;
+        if (R.hurt > 0 && Math.random() < 0.7) this.flyTrail(R);
       }
+      if (R.hurt > 0) R.hurt -= dt;
+
+      // 들고 있는 아이는 머리 위에 얹혀 따라온다
+      if (R.carry) { R.carry.x = R.x; R.carry.y = R.y; }
 
       // 충돌 (공중이면 낮은 장애물은 넘어간다. 벽과 해머는 못 넘는다)
       for (const o of this.obstacles) {
@@ -405,6 +449,10 @@ class RaceGame {
     /* --- 끝 --- */
     if (this.alive <= 1 && this.phase === 'race') {
       this.winner = this.runners.find((r) => r.alive) || null;
+      for (const R of this.runners) {                     // 공중에 멈춘 채 끝나지 않게
+        R.carry = R.heldBy = R.flight = R.stomp = null;
+        R.dizzy = R.squash = R.spin = 0;
+      }
       this.phase = 'done';
       this.finishedAt = this.time;
       if (this.winner) this.order.unshift(this.winner);
@@ -414,6 +462,8 @@ class RaceGame {
   }
 
   eliminate(R) {
+    if (R.carry) this.release(R);                         // 들고 있던 아이를 떨어뜨린다
+    R.stomp = null;
     R.alive = false;
     R.deadAt = this.time;
     this.alive--;
@@ -443,7 +493,7 @@ class RaceGame {
     while (this.frontier < limit && guard++ < 12) {
       const kinds = STAGES[Math.max(this.stageIdx, 0)].kinds;
       this.obstacles.push(this.makeObstacle(pick(kinds), this.frontier, heat));
-      const gap = lerp(540, 265, clamp(heat, 0, 1)) * rnd(0.82, 1.24);
+      const gap = lerp(395, 250, clamp(heat, 0, 1)) * rnd(0.8, 1.22);
       this.frontier += gap;
     }
   }
@@ -613,7 +663,7 @@ class RaceGame {
   /** 어디로 피할지 고른다 */
   chooseY(R, baseSpeed) {
     const sp = baseSpeed * R.speed;
-    const ahead = this.obstacles.filter((o) => o.x > R.x - 170 && o.x < R.x + 520);
+    const ahead = this.obstacles.filter((o) => o.x > R.x - 170 && o.x < R.x + 600);
     if (!ahead.length) {
       // 장애물이 없으면 살짝 배회
       return clamp(R.y + rnd(-1, 1) * this.trackH * 0.07, this.top + this.r, this.bot - this.r);
@@ -652,12 +702,173 @@ class RaceGame {
     if (this.opts.onSfx) this.opts.onSfx(name);
   }
 
+  /* ===== 밟기 / 들어서 던지기 ===== */
+
+  /** 기절. 별이 빙글빙글 돌고 비틀거린다 */
+  daze(O, t) {
+    O.dizzy = Math.max(O.dizzy, t);
+    O.punch = 0; O.dash = 0; O.stomp = null;
+    if (O.carry) this.release(O);
+  }
+
+  /** 지금 땅에서 떠 있는 높이(px) */
+  heightOf(R) {
+    const r = this.r;
+    if (R.heldBy) return r * 2.1 * clamp(R.heldBy.liftT / 0.3, 0, 1);
+    if (R.flight) {
+      const F = R.flight, k = clamp(F.t / F.T, 0, 1);
+      return r * (F.h0 * (1 - k) + Math.sin(Math.PI * k) * F.up);
+    }
+    if (R.stomp) return r * 1.5 * Math.sin((Math.PI / 2) * clamp(R.stomp.t / R.stomp.T, 0, 1));
+    if (R.jump > 0) {
+      const k = 1 - R.jump / R.jumpT;
+      // 밟고 뛰면 b 의 머리 높이(1.5r)에서 출발해 더 높이 오른다
+      return r * (Math.sin(k * Math.PI) * 3.3 * R.jumpPow + (R.jumpPow > 1 ? 1.5 * Math.max(0, 1 - k * 3) : 0));
+    }
+    return 0;
+  }
+
+  stepActions(R, dt, dizzy) {
+    const r = this.r;
+
+    // 밟는 중: b 의 머리 위로 내려앉는다
+    if (R.stomp) {
+      const S = R.stomp, B = S.b;
+      S.t += dt;
+      if (!B.alive || B.heldBy || B.flight) { R.stomp = null; return; }
+      const pull = Math.min(1, dt * 14);
+      R.x += (B.x - R.x) * pull;
+      R.y += (B.y - R.y) * pull;
+      if (S.t >= S.T) this.stompLand(R, B);
+      return;
+    }
+
+    // 들고 있는 중: 시간이 차면 던진다
+    if (R.carry) {
+      R.liftT += dt;
+      if (R.liftT >= R.liftDur) this.throwIt(R, R.carry);
+      return;
+    }
+
+    if (dizzy || R.jump > 0 || R.punch > 0) return;
+    R.actCd -= dt;
+    if (R.actCd > 0) return;
+
+    for (const O of this.runners) {
+      if (O === R || !O.alive || O.dizzy > 0 || O.heldBy || O.flight || O.carry || O.stomp || O.jump > 0) continue;
+      const dx = O.x - R.x, dy = O.y - R.y;
+      if (dx > r * 0.3 && dx < r * 2.4 && Math.abs(dy) < r) {
+        // 코앞에 앞서 달리는 아이가 있다 -> 밟고 뛰어오른다
+        if (Math.random() < 0.8 * dt) {
+          R.stomp = { b: O, t: 0, T: 0.2 };
+          R.actCd = rnd(18, 28);
+          this.sfx('jump');
+          return;
+        }
+      } else if (Math.hypot(dx, dy) < r * 2.4) {
+        // 바짝 붙어 있다 -> 들어서 던진다
+        if (Math.random() < 0.2 * dt) { this.liftUp(R, O); return; }
+      }
+    }
+  }
+
+  stompLand(R, B) {
+    R.stomp = null;
+    this.daze(B, rnd(1.4, 1.9));
+    B.squash = 0.35;
+    B.kx = B.ky = 0;
+    R.jumpPow = 1.85;                       // 평소 점프보다 훨씬 높이
+    R.jumpT = rnd(0.82, 0.95);
+    R.jump = R.jumpT;
+    R.jumpCd = 0.6;
+    this.sfx('stomp');
+    this.rings.push({ x: B.x, y: B.y + this.r * 0.4, age: 0, life: 0.45, hue: 28, r0: this.r * 0.8, grow: 4.6, thick: 5 });
+    this.pows.push({ x: B.x, y: B.y - this.r * 0.6, age: 0, life: 0.42, size: this.r * 1.9, spikes: 9, text: '꾹!', ang: rnd(0, 6.28), hue: 30 });
+    this.burst(B.x, B.y, 30, 12);
+    this.shakeScreen(0.16, this.r * 0.3);
+    if (this.opts.onStomp) this.opts.onStomp(R, B);
+  }
+
+  liftUp(A, B) {
+    A.carry = B; B.heldBy = A;
+    A.liftT = 0; A.liftDur = 0.55;
+    A.actCd = rnd(20, 32);
+    A.dash = 0;
+    B.punch = 0; B.dash = 0; B.stomp = null; B.kx = B.ky = 0; B.vy = 0; B.hurt = 0;
+    this.sfx('lift');
+    this.puff(A, 0.6);
+    if (this.opts.onThrow) this.opts.onThrow(A, B);
+  }
+
+  throwIt(A, B) {
+    const r = this.r;
+    A.carry = null; B.heldBy = null;
+    const sx = B.x, sy = B.y, T = rnd(0.75, 0.9);
+    // 착지 자리는 몇 군데 던져 보고 덜 위험한 쪽을 고른다
+    let ex = sx + 340, ey = sy, best = Infinity;
+    for (let i = 0; i < 4; i++) {
+      const cx = sx + rnd(300, 440);
+      const cy = clamp(sy + rnd(-0.38, 0.38) * this.trackH, this.top + r, this.bot - r);
+      let cost = Math.random() * 0.5;
+      for (const o of this.obstacles) if (Math.abs(o.x - cx) < 220) cost += this.danger(o, cy, T);
+      if (cost < best) { best = cost; ex = cx; ey = cy; }
+    }
+    B.flight = { t: 0, T, sx, sy, ex, ey, h0: 2.1, up: 3.4, spin: (Math.random() < 0.5 ? -1 : 1) * Math.PI * 4 };
+    this.sfx('throw');
+    this.rings.push({ x: A.x + r, y: A.y - r, age: 0, life: 0.38, hue: 200, r0: r * 0.8, grow: 4, thick: 4, white: true });
+    this.burst(A.x + r, A.y - r * 1.5, 200, 10);
+  }
+
+  /** 들고 있던 아이를 떨어뜨린다 (들던 사람이 먼저 탈락했을 때) */
+  release(A) {
+    const B = A.carry;
+    A.carry = null;
+    if (!B) return;
+    B.heldBy = null;
+    B.flight = { t: 0, T: 0.3, sx: B.x, sy: B.y, ex: B.x + rnd(20, 50), ey: B.y, h0: 2.1, up: 0, spin: 0 };
+  }
+
+  stepFlight(R, dt) {
+    const F = R.flight;
+    F.t += dt;
+    const k = clamp(F.t / F.T, 0, 1);
+    R.x = lerp(F.sx, F.ex, k);
+    R.y = lerp(F.sy, F.ey, k);
+    R.spin = F.spin * k;
+    R.bob += dt * 10;
+    if (F.up > 0 && Math.random() < 0.7) {
+      this.particles.push({
+        x: R.x - this.r * 0.5, y: R.y - this.heightOf(R) + rnd(-this.r * 0.4, this.r * 0.4),
+        vx: -rnd(40, 120), vy: rnd(-30, 30),
+        life: rnd(0.16, 0.3), age: 0, hue: 200, r: rnd(2.2, this.r * 0.38), light: 90,
+      });
+    }
+    if (F.t < F.T) return;
+
+    // 착지: 쿵! 그리고 기절
+    R.flight = null; R.spin = 0;
+    R.targetY = R.y; R.vy = 0;
+    this.puff(R, 1.2);
+    if (F.up > 0) {
+      this.daze(R, rnd(1.5, 1.9));
+      R.squash = 0.3;
+      this.sfx('thud');
+      this.rings.push({ x: R.x, y: R.y + this.r * 0.4, age: 0, life: 0.45, hue: 20, r0: this.r * 0.8, grow: 4.6, thick: 5 });
+      this.pows.push({ x: R.x, y: R.y - this.r * 0.6, age: 0, life: 0.42, size: this.r * 1.9, spikes: 9, text: '쿵!', ang: rnd(0, 6.28), hue: 20 });
+      this.shakeScreen(0.2, this.r * 0.4);
+    } else {
+      this.daze(R, 0.8);
+      this.sfx('land');
+    }
+  }
+
   /** 주먹 한 방. 닿는 범위 안의 아이들을 바깥으로 밀어낸다 (탈락은 아니다) */
   shove(P) {
     const reach = this.r * 6;
+    const hx = P.x + this.r * 1.5, hy = P.y;         // 주먹이 닿는 자리
+    const victims = [];
     this.sfx('punch');
-    this.rings.push({ x: P.x + this.r, y: P.y, age: 0, life: 0.42, hue: 48, r0: this.r * 1.1 });
-    this.burst(P.x + this.r * 1.2, P.y, 48, 12);
+
     for (const O of this.runners) {
       if (O === P || !O.alive) continue;
       let dx = O.x - P.x, dy = O.y - P.y;
@@ -668,7 +879,29 @@ class RaceGame {
       O.kx += (dx / (d || 1)) * f * 0.5;
       O.ky += (dy / (d || 1)) * f;
       O.stun = Math.max(O.stun, 0.2);
+      O.hurt = 0.55;
+      O.hurtAng = Math.atan2(dy, dx);
+      victims.push(O);
+      // 맞은 자리마다 작은 타격 표시
+      this.pows.push({ x: O.x, y: O.y, age: 0, life: 0.34, size: this.r * 1.15, spikes: 8, text: '', ang: rnd(0, 6.28), hue: 52 });
+      this.burst(O.x, O.y, 52, 7);
     }
+
+    // 큰 타격 표시 + 충격파 두 겹 + 파편
+    const word = pick(['퍽!', '쾅!', '빡!', '펑!']);
+    this.pows.push({ x: hx, y: hy, age: 0, life: 0.5, size: this.r * 2.6, spikes: 11, text: word, ang: rnd(0, 6.28), hue: 46 });
+    this.rings.push({ x: hx, y: hy, age: 0, life: 0.5, hue: 48, r0: this.r * 1.1, grow: 6.4, thick: 6 });
+    this.rings.push({ x: hx, y: hy, age: 0, life: 0.36, hue: 0, r0: this.r * 0.6, grow: 3.6, thick: 4, white: true });
+    this.burst(hx, hy, 48, 16);
+    this.shakeScreen(victims.length ? 0.28 : 0.16, this.r * (0.28 + Math.min(victims.length, 6) * 0.06));
+
+    if (this.opts.onShove && victims.length) this.opts.onShove(P, victims);
+    return victims;
+  }
+
+  shakeScreen(time, amp) {
+    if (time > this.shake) this.shake = time;
+    if (amp > this.shakeAmp) this.shakeAmp = amp;
   }
 
   /* ===== 파티클 ===== */
@@ -694,6 +927,15 @@ class RaceGame {
     });
   }
 
+  /** 맞고 날아가는 아이가 남기는 흰 줄 */
+  flyTrail(R) {
+    this.particles.push({
+      x: R.x - Math.sign(R.kx || 1) * this.r * 0.6, y: R.y + rnd(-this.r * 0.5, this.r * 0.5),
+      vx: -R.kx * 0.12 + rnd(-30, 30), vy: -R.ky * 0.12 + rnd(-30, 30),
+      life: rnd(0.16, 0.3), age: 0, hue: 55, r: rnd(2.2, this.r * 0.38), light: 92,
+    });
+  }
+
   burst(x, y, hue, n) {
     for (let i = 0; i < n; i++) {
       const a = rnd(0, Math.PI * 2), s = rnd(60, 300);
@@ -713,6 +955,12 @@ class RaceGame {
     this.particles = this.particles.filter((p) => p.age < p.life);
     for (const g of this.rings) g.age += dt;
     this.rings = this.rings.filter((g) => g.age < g.life);
+    for (const w of this.pows) w.age += dt;
+    this.pows = this.pows.filter((w) => w.age < w.life);
+    if (this.shake > 0) {
+      this.shake -= dt;
+      if (this.shake <= 0) { this.shake = 0; this.shakeAmp = 0; }
+    }
   }
 
   /* ===== 그리기 ===== */
@@ -720,16 +968,23 @@ class RaceGame {
     const c = this.ctx, W = this.W, H = this.H;
     c.clearRect(0, 0, W, H);
 
+    /* 화면 흔들림 (주먹이 터질 때) */
+    c.save();
+    if (this.shake > 0) {
+      const k = Math.min(this.shake / 0.28, 1);
+      c.translate(rnd(-1, 1) * this.shakeAmp * k, rnd(-1, 1) * this.shakeAmp * k);
+    }
+
     /* 배경 */
     const sky = c.createLinearGradient(0, 0, 0, H);
     sky.addColorStop(0, '#151d3c');
     sky.addColorStop(1, '#0a0e20');
     c.fillStyle = sky;
-    c.fillRect(0, 0, W, H);
+    c.fillRect(-30, -30, W + 60, H + 60);
 
     /* 트랙 */
     c.fillStyle = '#1d2749';
-    c.fillRect(0, this.top, W, this.trackH);
+    c.fillRect(-30, this.top, W + 60, this.trackH);
 
     // 흐르는 줄무늬
     c.fillStyle = 'rgba(255,255,255,.028)';
@@ -739,8 +994,8 @@ class RaceGame {
 
     // 가장자리
     c.fillStyle = '#ffd23f';
-    c.fillRect(0, this.top - 4, W, 4);
-    c.fillRect(0, this.bot, W, 4);
+    c.fillRect(-30, this.top - 4, W + 60, 4);
+    c.fillRect(-30, this.bot, W + 60, 4);
 
     // 거리 표시
     c.font = '600 12px Gothic A1, sans-serif';
@@ -775,18 +1030,22 @@ class RaceGame {
     }
 
     /* 달리는 아이들 */
-    const list = this.runners.filter((r) => r.alive).sort((a, b) => a.y - b.y);
+    // 던져진 아이는 위에, 들려 있는 아이는 들고 있는 아이 바로 뒤에 그린다
+    const zOf = (r) => r.y + (r.heldBy ? 0.5 : 0) + (r.flight ? 1000 : 0);
+    const list = this.runners.filter((r) => r.alive).sort((a, b) => zOf(a) - zOf(b));
     for (const R of list) this.drawRunner(c, R, false);
     this.drawLabels(c, list);
 
     /* 충격파 링 (도약·착지) */
     for (const g of this.rings) {
       const k = g.age / g.life;
-      c.globalAlpha = (1 - k) * 0.75;
-      c.strokeStyle = `hsl(${g.hue},95%,78%)`;
-      c.lineWidth = 3 * (1 - k) + 1;
+      const ease = g.grow ? 1 - (1 - k) * (1 - k) : k;      // 주먹 링은 확 퍼졌다가 느려진다
+      const rr = g.r0 + ease * this.r * (g.grow || 3.4);
+      c.globalAlpha = (1 - k) * (g.grow ? 0.95 : 0.75);
+      c.strokeStyle = g.white ? '#fff' : `hsl(${g.hue},95%,78%)`;
+      c.lineWidth = (g.thick || 3) * (1 - k) + 1;
       c.beginPath();
-      c.ellipse(g.x - this.camX, g.y, g.r0 + k * this.r * 3.4, (g.r0 + k * this.r * 3.4) * 0.36, 0, 0, Math.PI * 2);
+      c.ellipse(g.x - this.camX, g.y, rr, rr * (g.grow ? 0.7 : 0.36), 0, 0, Math.PI * 2);
       c.stroke();
     }
     c.globalAlpha = 1;
@@ -794,12 +1053,69 @@ class RaceGame {
     /* 파티클 */
     for (const p of this.particles) {
       c.globalAlpha = 1 - p.age / p.life;
-      c.fillStyle = `hsl(${p.hue},90%,64%)`;
+      c.fillStyle = `hsl(${p.hue},90%,${p.light || 64}%)`;
       c.beginPath();
       c.arc(p.x - this.camX, p.y, p.r, 0, Math.PI * 2);
       c.fill();
     }
     c.globalAlpha = 1;
+
+    /* 타격 표시 (만화 같은 뾰족한 별 + 글자) */
+    for (const w of this.pows) this.drawPow(c, w);
+
+    c.restore();
+  }
+
+  /** 뾰족한 폭발 모양. 처음에 튀어나왔다가 사라진다 */
+  drawPow(c, w) {
+    const k = w.age / w.life;
+    const pop = k < 0.25 ? 0.4 + (k / 0.25) * 0.75 : 1.15 - (k - 0.25) * 0.2;   // 튀어나온 뒤 살짝 줄어든다
+    const R = w.size * pop;
+    const sx = w.x - this.camX;
+    c.save();
+    c.translate(sx, w.y);
+    c.rotate(w.ang + k * 0.35);
+    c.globalAlpha = k < 0.6 ? 1 : 1 - (k - 0.6) / 0.4;
+    c.beginPath();
+    const n = w.spikes * 2;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const rr = i % 2 ? R * 0.52 : R;
+      c.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    c.closePath();
+    c.fillStyle = `hsl(${w.hue},100%,62%)`;
+    c.fill();
+    c.lineJoin = 'round';
+    c.lineWidth = Math.max(2, R * 0.1);
+    c.strokeStyle = '#fff';
+    c.stroke();
+    c.beginPath();                                   // 안쪽 밝은 심
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2;
+      const rr = (i % 2 ? R * 0.52 : R) * 0.58;
+      c.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    c.closePath();
+    c.fillStyle = 'rgba(255,250,200,.95)';
+    c.fill();
+    c.restore();
+
+    if (w.text) {
+      c.save();
+      c.globalAlpha = k < 0.7 ? 1 : 1 - (k - 0.7) / 0.3;
+      c.translate(sx, w.y - R * 0.05);
+      c.rotate(-0.12);
+      c.textAlign = 'center'; c.textBaseline = 'middle';
+      c.font = `900 ${Math.round(R * 0.62)}px Jua, Gothic A1, sans-serif`;
+      c.lineJoin = 'round';
+      c.lineWidth = Math.max(3, R * 0.14);
+      c.strokeStyle = '#7a1230';
+      c.strokeText(w.text, 0, 0);
+      c.fillStyle = '#fff';
+      c.fillText(w.text, 0, 0);
+      c.restore();
+    }
   }
 
   drawObstacle(c, o) {
@@ -920,19 +1236,35 @@ class RaceGame {
   }
 
   drawRunner(c, R, ghost) {
-    const sx = R.x - this.camX;
+    let sx = R.x - this.camX;
     if (sx < -90 || sx > this.W + 90) return;
     const r = this.r;
-    const air = !ghost && R.jump > 0 ? Math.sin((1 - R.jump / R.jumpT) * Math.PI) : 0;
-    const hop = ghost ? 0 : Math.abs(Math.sin(R.bob)) * r * 0.42 + air * r * 3.3;
-    const y = R.y - hop;
+    const hurt = !ghost && R.hurt > 0 ? clamp(R.hurt / 0.55, 0, 1) : 0;   // 맞은 직후 1 -> 0
+    if (hurt) sx += Math.sin(this.time * 70) * r * 0.14 * hurt;             // 부르르 떤다
+    const h = ghost ? 0 : this.heightOf(R);                      // 떠 있는 높이(px)
+    const carried = !ghost && !!(R.heldBy || R.flight);          // 들려 있거나 던져진 중
+    const air = ghost || carried ? 0 : clamp(h / (r * 3.3), 0, 1); // 점프 느낌(길쭉, 빛남)
+    const hs = clamp(h / (r * 3.3), 0, 1);                       // 그림자가 줄어드는 정도
+    const dz = !ghost && R.dizzy > 0;
+    const sqz = !ghost ? clamp(R.squash / 0.35, 0, 1) : 0;       // 밟혀 납작
+    const hop = ghost || carried ? 0 : Math.abs(Math.sin(R.bob)) * r * 0.42;
+    const y = R.y - hop - h + sqz * r * 0.3;
 
     // 그림자 (뜰수록 작아진다)
-    if (!ghost) {
-      c.fillStyle = `rgba(0,0,0,${0.34 - air * 0.2})`;
+    if (!ghost && !R.heldBy) {
+      c.fillStyle = `rgba(0,0,0,${0.34 - hs * 0.2})`;
       c.beginPath();
-      c.ellipse(sx, R.y + r * 0.82, r * (0.85 - air * 0.35), r * (0.3 - air * 0.12), 0, 0, Math.PI * 2);
+      c.ellipse(sx, R.y + r * 0.82, r * (0.85 - hs * 0.35), r * (0.3 - hs * 0.12), 0, 0, Math.PI * 2);
       c.fill();
+    }
+
+    // 던져지면 빙글 돌고, 기절하면 좌우로 휘청인다
+    c.save();
+    if (R.flight && !ghost) {
+      c.translate(sx, y); c.rotate(R.spin); c.translate(-sx, -y);
+    } else if (dz) {
+      const wob = Math.sin(this.time * 7 + R.bob) * 0.22 * Math.min(R.dizzy / 0.3, 1);
+      c.translate(sx, y + r); c.rotate(wob); c.translate(-sx, -(y + r));
     }
 
     // 대쉬 중이면 뒤로 빛줄기
@@ -1046,7 +1378,7 @@ class RaceGame {
     }
 
     // 몸 (공중이면 길쭉하게 늘어나고 하얗게 빛난다)
-    const rx = r * (1 - air * 0.2), ry = r * (1 + air * 0.3);
+    const rx = r * (1 - air * 0.2 + sqz * 0.35), ry = r * (1 + air * 0.3 - sqz * 0.35);
     const g = c.createRadialGradient(sx - r * 0.35, y - r * 0.4, 1, sx, y, r * 1.25);
     g.addColorStop(0, `hsl(${R.hue},95%,${76 + air * 18}%)`);
     g.addColorStop(1, `hsl(${R.hue},80%,${48 + air * 22}%)`);
@@ -1057,6 +1389,10 @@ class RaceGame {
     c.strokeStyle = air > 0.15 ? `rgba(255,255,255,${0.35 + air * 0.55})` : 'rgba(0,0,0,.28)';
     c.lineWidth = air > 0.15 ? 2.4 : 1.6;
     c.stroke();
+    if (hurt > 0) {                                  // 하얗게 번쩍
+      c.fillStyle = `rgba(255,255,255,${Math.min(hurt * 1.2, 1) * 0.75})`;
+      c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.fill();
+    }
 
     // 점박이 무늬
     if (L.spots) {
@@ -1074,7 +1410,17 @@ class RaceGame {
     c.strokeStyle = '#16203c';
     c.lineWidth = Math.max(1.5, r * 0.13);
     c.lineCap = 'round';
-    if (air > 0.45) {
+    if (dz) {                                        // 기절: X 눈
+      const xEye = (ex, ey) => {
+        const q = r * 0.13;
+        c.beginPath();
+        c.moveTo(ex - q, ey - q); c.lineTo(ex + q, ey + q);
+        c.moveTo(ex + q, ey - q); c.lineTo(ex - q, ey + q);
+        c.stroke();
+      };
+      xEye(sx + r * 0.24, y - r * 0.12);
+      xEye(sx - r * 0.24, y - r * 0.12);
+    } else if (air > 0.45 || hurt > 0.2) {
       shutLine(sx + r * 0.08, sx + r * 0.36);
       shutLine(sx - r * 0.38, sx - r * 0.1);
     } else {
@@ -1084,14 +1430,39 @@ class RaceGame {
     }
 
     // 입
-    if (L.mouth === 'smile' && air < 0.45) {
+    if (L.mouth === 'smile' && air < 0.45 && !dz) {
       c.lineWidth = Math.max(1.3, r * 0.11);
       c.beginPath(); c.arc(sx, y + r * 0.1, r * 0.3, 0.18 * Math.PI, 0.82 * Math.PI); c.stroke();
-    } else if (L.mouth === 'open') {
+    } else if (L.mouth === 'open' || hurt > 0.2 || dz) {
       c.fillStyle = '#16203c';
       c.beginPath();
       c.ellipse(sx, y + r * 0.3, r * 0.18, r * (air > 0.3 ? 0.3 : 0.2), 0, 0, Math.PI * 2);
       c.fill();
+    }
+
+    // 맞거나 기절하면 머리 위로 별이 빙글빙글
+    const starK = Math.max(hurt > 0.1 ? Math.min(hurt * 2, 1) : 0, dz ? Math.min(R.dizzy / 0.35, 1) : 0);
+    if (starK > 0) {
+      const n = dz ? 4 : 3;
+      c.fillStyle = '#ffe14a';
+      c.strokeStyle = 'rgba(120,70,0,.8)';
+      c.lineWidth = 1;
+      for (let i = 0; i < n; i++) {
+        const a = this.time * (dz ? 6.5 : 9) + (i * Math.PI * 2) / n;
+        const stx = sx + Math.cos(a) * r * (dz ? 1.2 : 0.95);
+        const sty = y - r * (dz ? 1.1 : 1.4) + Math.sin(a) * r * (dz ? 0.34 : 0.32);
+        const sr = r * (dz ? 0.46 : 0.3) * starK;
+        c.save();
+        c.translate(stx, sty); c.rotate(a * 1.3);
+        c.beginPath();
+        for (let j = 0; j < 10; j++) {
+          const aa = (j / 10) * Math.PI * 2;
+          const rr = j % 2 ? sr * 0.45 : sr;
+          c.lineTo(Math.cos(aa) * rr, Math.sin(aa) * rr);
+        }
+        c.closePath(); c.fill(); c.stroke();
+        c.restore();
+      }
     }
 
     // 휘두르는 팔
@@ -1107,6 +1478,20 @@ class RaceGame {
       c.beginPath(); c.arc(ax, ay, r * 0.44, 0, Math.PI * 2); c.fill();
       c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.5; c.stroke();
     }
+
+    // 머리 위로 번쩍 든 두 팔
+    if (!ghost && R.carry) {
+      const up = clamp(R.liftT / 0.3, 0, 1);
+      c.strokeStyle = dark;
+      c.lineWidth = r * 0.36; c.lineCap = 'round';
+      for (const sd of [-1, 1]) {
+        const hx = sx + sd * r * (0.85 - 0.25 * up), hy = y - r * (0.2 + 1.1 * up);
+        c.beginPath(); c.moveTo(sx + sd * r * 0.7, y + r * 0.1); c.lineTo(hx, hy); c.stroke();
+        c.fillStyle = `hsl(${R.hue},95%,66%)`;
+        c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
+      }
+    }
+    c.restore();
   }
 
   /**
@@ -1133,8 +1518,7 @@ class RaceGame {
       const w = c.measureText(R.name).width;
 
       // 점프는 완만한 곡선이라 따라가도 되지만, bob 은 너무 빨라 뺀다.
-      const air = R.jump > 0 ? Math.sin((1 - R.jump / R.jumpT) * Math.PI) : 0;
-      const headY = R.y - air * r * 3.3 - r;
+      const headY = R.y - this.heightOf(R) - r;
       const baseTy = headY - fs * 0.5;
 
       // 빈 칸 찾기. 위로만 쌓으면 탑이 되므로 옆으로 비키는 쪽을 먼저 본다.

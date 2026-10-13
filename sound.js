@@ -19,6 +19,7 @@ const Sound = {
   /* 같은 소리가 몰아쳐 시끄러워지지 않게 최소 간격(ms)을 둔다 */
   GAP: {
     jump: 70, land: 90, out: 70, punch: 180, boom: 140, countdown: 120,
+    stomp: 160, lift: 160, throw: 160, thud: 160,
   },
 
   /* ---------- 준비 ---------- */
@@ -132,6 +133,23 @@ const Sound = {
     punch() {
       this.hiss({ t: 0.14, gain: 0.95, f0: 2400, f1: 170 });
       this.tone({ type: 'sine', f0: 190, f1: 48, t: 0.19, gain: 0.8 });
+    },
+
+    stomp() {
+      this.tone({ type: 'sine', f0: 260, f1: 90, t: 0.14, gain: 0.8 });
+      this.tone({ type: 'triangle', f0: 300, f1: 780, t: 0.22, gain: 0.4, at: 0.07 });
+    },
+
+    lift() { this.tone({ type: 'triangle', f0: 300, f1: 580, t: 0.22, gain: 0.4 }); },
+
+    throw() {
+      this.hiss({ t: 0.35, gain: 0.5, f0: 500, f1: 3200, type: 'bandpass', q: 0.9 });
+      this.tone({ type: 'sine', f0: 200, f1: 520, t: 0.25, gain: 0.3 });
+    },
+
+    thud() {
+      this.tone({ type: 'sine', f0: 150, f1: 45, t: 0.24, gain: 0.9 });
+      this.hiss({ t: 0.12, gain: 0.5, f0: 800, f1: 120 });
     },
 
     boom() {

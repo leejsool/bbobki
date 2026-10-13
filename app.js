@@ -17,7 +17,7 @@ const el = {
   btnStart: $('btn-start'), fetchedAt: $('fetched-at'),
   stage: $('stage'), hudClass: $('hud-class'), hudAlive: $('hud-alive'),
   hudLap: $('hud-lap'), btnQuit: $('btn-quit'),
-  killFeed: $('kill-feed'), banner: $('stage-banner'), countdown: $('countdown'),
+  killFeed: $('kill-feed'), eventToast: $('event-toast'), banner: $('stage-banner'), countdown: $('countdown'),
   confetti: $('confetti'),
   winMeta: $('win-meta'), winName: $('win-name'), winSub: $('win-sub'),
   btnAgain: $('btn-again'), btnHome: $('btn-home'),
@@ -41,6 +41,39 @@ function toggleSound() {
   Sound.setOn(!Sound.on);
   renderSound();
   if (Sound.on) Sound.play('countdown');   // 켰으면 들려 준다
+}
+
+/* ---------- 화면 아래 안내 ---------- */
+// 받침이 있으면 withBatchim, 없으면 without (한글이 아니면 둘 다 적는다)
+function josa(word, withBatchim, without) {
+  const ch = word.charCodeAt(word.length - 1);
+  if (ch < 0xAC00 || ch > 0xD7A3) return `${withBatchim}(${without})`;
+  return (ch - 0xAC00) % 28 ? withBatchim : without;
+}
+
+let toastUntil = 0;
+/** 이미 안내가 떠 있으면 새 소식은 버린다 -> 동시에 터져도 하나만 보인다 */
+function showToast(text, ms = 2600) {
+  const now = performance.now();
+  if (now < toastUntil) return;
+  toastUntil = now + ms;
+  el.eventToast.textContent = text;
+  el.eventToast.classList.remove('show');
+  void el.eventToast.offsetWidth;
+  el.eventToast.classList.add('show');
+}
+
+function clearToast() {
+  toastUntil = 0;
+  el.eventToast.classList.remove('show');
+}
+
+function punchText(P, victims) {
+  const names = victims.slice(0, 3).map((v) => v.name).join(', ');
+  const more = victims.length > 3 ? ` 외 ${victims.length - 3}명` : '';
+  const tail = more || names;
+  const target = names + more;
+  return `🥊 ${P.name}${josa(P.name, '이', '가')} 주먹으로 ${target}${josa(tail, '을', '를')} 밀칩니다!`;
 }
 
 /* ---------- 화면 전환 ---------- */
@@ -173,6 +206,7 @@ function runGame(cls) {
   el.hudAlive.textContent = cls.members.length;
   el.hudLap.textContent = '구간 1';
   el.killFeed.innerHTML = '';
+  clearToast();
   show('race');
 
   if (!game) {
@@ -206,6 +240,13 @@ function runGame(cls) {
         setTimeout(() => d.remove(), 3000);
         while (el.killFeed.children.length > 6) el.killFeed.firstChild.remove();
       },
+      onShove(P, victims) { showToast(punchText(P, victims)); },
+      onStomp(A, B) {
+        showToast(`🦶 ${A.name}${josa(A.name, '이', '가')} ${B.name}${josa(B.name, '을', '를')} 밟고 높이 뛰어오릅니다!`);
+      },
+      onThrow(A, B) {
+        showToast(`💪 ${A.name}${josa(A.name, '이', '가')} ${B.name}${josa(B.name, '을', '를')} 들어서 던집니다!`);
+      },
       onWin(R, order) { showWin(R, order, cls); },
     });
   } else {
@@ -219,6 +260,7 @@ function runGame(cls) {
 function showWin(R, order, cls) {
   game.stop();
   el.countdown.hidden = true;
+  clearToast();
   if (!R) { show('pick'); return; }
 
   el.winMeta.textContent = `${selGrade}학년 ${selClass}반 ${R.no}번`;
@@ -271,7 +313,7 @@ el.btnRetry.onclick = boot;
 el.btnStart.onclick = startRace;
 el.sndPick.onclick = toggleSound;
 el.sndRace.onclick = toggleSound;
-el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; show('pick'); };
+el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
 el.btnAgain.onclick = () => { confettiStop(); startRace(); };
 el.btnHome.onclick = () => { confettiStop(); show('pick'); };
 
