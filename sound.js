@@ -19,7 +19,7 @@ const Sound = {
   /* 같은 소리가 몰아쳐 시끄러워지지 않게 최소 간격(ms)을 둔다 */
   GAP: {
     jump: 70, land: 90, out: 70, punch: 180, boom: 140, countdown: 120,
-    stomp: 160, lift: 160, throw: 160, thud: 160,
+    stomp: 160, lift: 160, throw: 160, thud: 160, growl: 700, gulp: 120, slurp: 200,
   },
 
   /* ---------- 준비 ---------- */
@@ -155,6 +155,27 @@ const Sound = {
     boom() {
       this.tone({ type: 'sine', f0: 130, f1: 36, t: 0.32, gain: 0.72 });
       this.hiss({ t: 0.15, gain: 0.3, f0: 900, f1: 90 });
+    },
+
+    /* 괴물 으르렁: 낮게 떨리는 울림 */
+    growl() {
+      this.tone({ type: 'sawtooth', f0: 70, f1: 42, t: 0.9, gain: 0.55 });
+      this.tone({ type: 'square', f0: 96, f1: 55, t: 0.8, gain: 0.22, at: 0.04 });
+      this.tone({ type: 'sawtooth', f0: 74, f1: 46, t: 0.6, gain: 0.3, at: 0.2 });
+      this.hiss({ t: 0.85, gain: 0.3, f0: 380, f1: 70, type: 'lowpass', q: 4 });
+    },
+
+    /* 꿀꺽: 삼키는 소리 */
+    gulp() {
+      this.tone({ type: 'sine', f0: 240, f1: 55, t: 0.22, gain: 0.9 });
+      this.tone({ type: 'triangle', f0: 150, f1: 62, t: 0.2, gain: 0.5, at: 0.11 });
+      this.hiss({ t: 0.14, gain: 0.5, f0: 700, f1: 110 });
+    },
+
+    /* 혀가 착 달라붙는 소리 */
+    slurp() {
+      this.hiss({ t: 0.16, gain: 0.5, f0: 3000, f1: 500, type: 'bandpass', q: 2 });
+      this.tone({ type: 'sine', f0: 700, f1: 180, t: 0.2, gain: 0.34 });
     },
 
     out() {

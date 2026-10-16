@@ -213,6 +213,7 @@ h1{
 #confetti{position:absolute; inset:0; width:100%; height:100%}
 .win-card{position:relative; text-align:center; padding:24px; animation:winIn .6s cubic-bezier(.2,1.3,.4,1)}
 @keyframes winIn{from{opacity:0; transform:scale(.6) translateY(30px)}}
+.win-hero{display:block; margin:0 auto 4px; width:clamp(160px,34vh,320px); height:clamp(160px,34vh,320px)}
 .win-label{
   margin:0; font-size:13px; font-weight:900; letter-spacing:.5em;
   color:var(--go); padding-left:.5em;

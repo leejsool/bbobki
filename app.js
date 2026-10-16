@@ -18,7 +18,7 @@ const el = {
   stage: $('stage'), hudClass: $('hud-class'), hudAlive: $('hud-alive'),
   hudLap: $('hud-lap'), btnQuit: $('btn-quit'),
   killFeed: $('kill-feed'), eventToast: $('event-toast'), banner: $('stage-banner'), countdown: $('countdown'),
-  confetti: $('confetti'),
+  confetti: $('confetti'), winHero: $('win-hero'),
   winMeta: $('win-meta'), winName: $('win-name'), winSub: $('win-sub'),
   btnAgain: $('btn-again'), btnHome: $('btn-home'),
   sndPick: $('snd-pick'), sndRace: $('snd-race'),
@@ -28,6 +28,7 @@ let roster = null;        // { fetchedAt, grades:[...] }
 let selGrade = null;
 let selClass = null;
 let game = null;
+let hero = null;          // 당첨 화면에서 세레모니하는 우승자
 let busy = false;
 
 /* ---------- 소리 ---------- */
@@ -53,9 +54,9 @@ function josa(word, withBatchim, without) {
 
 let toastUntil = 0;
 /** 이미 안내가 떠 있으면 새 소식은 버린다 -> 동시에 터져도 하나만 보인다 */
-function showToast(text, ms = 2600) {
+function showToast(text, ms = 2600, force = false) {
   const now = performance.now();
-  if (now < toastUntil) return;
+  if (now < toastUntil && !force) return;
   toastUntil = now + ms;
   el.eventToast.textContent = text;
   el.eventToast.classList.remove('show');
@@ -231,11 +232,11 @@ function runGame(cls) {
         void el.banner.offsetWidth;
         el.banner.classList.add('show');
       },
-      onEliminate(R, alive) {
-        Sound.play('out');
+      onEliminate(R, alive, cause) {
+        if (cause !== 'maw') Sound.play('out');       // 괴물에게 먹힌 소리는 게임 쪽에서 낸다
         el.hudAlive.textContent = alive;
         const d = document.createElement('div');
-        d.textContent = `${R.name} 탈락`;
+        d.textContent = cause === 'maw' ? `👹 ${R.name} 꿀꺽!` : `${R.name} 탈락`;
         el.killFeed.appendChild(d);
         setTimeout(() => d.remove(), 3000);
         while (el.killFeed.children.length > 6) el.killFeed.firstChild.remove();
@@ -246,6 +247,11 @@ function runGame(cls) {
       },
       onThrow(A, B) {
         showToast(`💪 ${A.name}${josa(A.name, '이', '가')} ${B.name}${josa(B.name, '을', '를')} 들어서 던집니다!`);
+      },
+      onMaw(kind, prey) {
+        if (kind === 'wake') showToast('👹 왼쪽 끝에서 괴물이 깨어났습니다! 뒤처지면 먹힙니다!', 3200, true);
+        else if (kind === 'hunt') showToast(`🩸 ${prey.name}${josa(prey.name, '이', '가')} 기절! 괴물이 노립니다!`, 2400, true);
+        else showToast('⚠️ 괴물이 으르렁… 왼쪽 끝에서 도망치세요!', 2400, true);
       },
       onWin(R, order) { showWin(R, order, cls); },
     });
@@ -269,6 +275,8 @@ function showWin(R, order, cls) {
   show('win');
   Sound.play('win');
   confettiRun();
+  if (!hero) hero = new WinHero(el.winHero);
+  hero.start(R);          // 화면이 보인 뒤에 시작해야 캔버스 크기가 잡힌다
 }
 
 /* ---------- 폭죽 ---------- */
@@ -314,8 +322,8 @@ el.btnStart.onclick = startRace;
 el.sndPick.onclick = toggleSound;
 el.sndRace.onclick = toggleSound;
 el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
-el.btnAgain.onclick = () => { confettiStop(); startRace(); };
-el.btnHome.onclick = () => { confettiStop(); show('pick'); };
+el.btnAgain.onclick = () => { confettiStop(); hero && hero.stop(); startRace(); };
+el.btnHome.onclick = () => { confettiStop(); hero && hero.stop(); show('pick'); };
 
 Sound.load();
 renderSound();
