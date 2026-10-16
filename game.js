@@ -58,12 +58,16 @@ function looksOf(name) {
   };
 }
 
-/* ---------- 우승 세레모니 ----------
-   모든 동작은 땅에서 시작해 땅에서 끝나므로 이어 붙여도 튀지 않는다.
-   h: 높이, dx: 옆으로 움직인 거리 (단위는 캐릭터 반지름), rot: 회전(rad),
-   flipX: 좌우 뒤집기(1~-1, 빙글 도는 느낌), sq: 납작, hop: 통통, arms: 팔 모양 */
+/* ---------- 우승 세레모니 (춤) ----------
+   우승하면 아래 춤 가운데 하나를 무작위로 골라 춘다.
+   자세 필드 (길이 단위는 캐릭터 반지름)
+     h 높이, dx 옆으로 움직인 거리, rot 회전(rad), flipX 좌우 뒤집기(1~-1, 도는 느낌),
+     sq 납작, hop 통통, arms 팔 모양, aw 팔 올림 정도(0~1), st 로봇 동작 번호,
+     legSw / legAmp+legPh 다리 벌림(없으면 달리기 다리) */
 const TAU = Math.PI * 2;
 const squashAt = (fr) => 0.45 * Math.max(0, 1 - Math.min(fr, 1 - fr) * 9);   // 뛰기 직전·착지 순간
+
+/* 막춤의 재료: 모든 동작은 땅에서 시작해 땅에서 끝나므로 이어 붙여도 튀지 않는다 */
 const CEREMONY = {
   cheer:     { dur: 1.7, f(k, p) { const fr = (k * 3) % 1; p.h = 2.7 * Math.sin(Math.PI * fr); p.sq = squashAt(fr); p.arms = 'up'; } },
   flip:      { dur: 1.2, f(k, p) { p.h = 3.6 * Math.sin(Math.PI * k); p.rot = -TAU * k; p.sq = squashAt(k); } },
@@ -74,16 +78,139 @@ const CEREMONY = {
   bigjump:   { dur: 1.4, f(k, p) { p.h = 3.9 * Math.sin(Math.PI * k); p.arms = 'up'; p.sq = squashAt(k); } },
 };
 
-class Ceremony {
-  constructor() {
-    // 첫 동작은 만세 점프, 나머지는 매번 섞어서
-    const rest = Object.keys(CEREMONY).filter((n) => n !== 'cheer');
-    for (let i = rest.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      [rest[i], rest[j]] = [rest[j], rest[i]];
+/* 춤마다 박자에 맞춰 자세를 만든다. t 는 춤을 시작하고 흐른 시간(초) */
+const DANCES = {
+  // 막춤: 위의 동작을 매번 섞어서 이어 붙인다 (Ceremony 가 따로 처리)
+  freestyle: { name: '막춤' },
+
+  // 문워크: 앞을 보고 미끄러지듯 뒤로 간다. 끝에서 휙 돌아 반대쪽으로 또 뒤로.
+  moonwalk: {
+    name: '문워크',
+    f(t, p) {
+      const u = t % 4.4, ph = t * 9;
+      p.arms = 'moon'; p.rot = -0.1; p.hop = 0.14 * Math.abs(Math.sin(ph));
+      p.legAmp = 0.45; p.legPh = ph;
+      if (u < 1.9) {                                        // 오른쪽을 보고 왼쪽으로 스르르
+        p.dx = 1.4 * Math.cos((Math.PI * u) / 1.9);
+      } else if (u < 2.2) {                                 // 휙 돈다
+        const k = (u - 1.9) / 0.3;
+        p.dx = -1.4; p.flipX = Math.cos(Math.PI * k); p.h = 0.9 * Math.sin(Math.PI * k); p.arms = 'up';
+      } else if (u < 4.1) {                                 // 왼쪽을 보고 오른쪽으로 스르르
+        p.dx = -1.4 * Math.cos((Math.PI * (u - 2.2)) / 1.9); p.flipX = -1;
+      } else {
+        const k = (u - 4.1) / 0.3;
+        p.dx = 1.4; p.flipX = -Math.cos(Math.PI * k); p.h = 0.9 * Math.sin(Math.PI * k); p.arms = 'up';
+      }
+    },
+  },
+
+  // 삐끼삐끼: 무릎을 튕기며 한 팔은 번쩍, 한 팔은 허리에. 박자마다 바꾼다.
+  pikipiki: {
+    name: '삐끼삐끼',
+    f(t, p) {
+      const b = t * Math.PI * 6, s = Math.sin(b / 2);
+      p.arms = 'kiki'; p.aw = clamp(s * 3, -1, 1) * 0.5 + 0.5;
+      p.hop = 0.42 * Math.abs(Math.sin(b)); p.sq = 0.12 * (1 - Math.abs(Math.sin(b)));
+      p.rot = 0.13 * s; p.dx = 0.45 * s; p.bobSpeed = 16;
+    },
+  },
+
+  // 말춤: 한 손은 머리 위에서 올가미를 돌리고, 다리를 크게 벌려 달리듯 통통.
+  horse: {
+    name: '말춤',
+    f(t, p) {
+      const b = t * Math.PI * 4;
+      p.arms = 'lasso'; p.hop = 0.5 * Math.abs(Math.sin(b)); p.rot = 0.09 * Math.sin(b);
+      p.dx = 0.7 * Math.sin(b / 2); p.sq = 0.1 * Math.abs(Math.cos(b));
+      p.legAmp = 1.0; p.legPh = b;
+    },
+  },
+
+  // 로봇춤: 뚝뚝 끊어서 움직인다.
+  robot: {
+    name: '로봇춤',
+    f(t, p) {
+      const st = Math.floor(t * 4);
+      p.st = st; p.arms = 'robot';
+      p.rot = [0.16, -0.16, 0, 0.1][st % 4];
+      p.dx = [-0.8, 0.8, 0, 0.5][st % 4];
+      p.legSw = (st % 2 ? 1 : -1) * 0.45;
+    },
+  },
+
+  // 디스코: 한 팔은 하늘로, 한 팔은 땅으로. 어깨를 흔들며 번갈아.
+  disco: {
+    name: '디스코',
+    f(t, p) {
+      const b = t * Math.PI * 2.4, s = Math.sin(b);
+      p.arms = 'disco'; p.aw = clamp(s * 3, -1, 1) * 0.5 + 0.5;
+      p.rot = 0.14 * s; p.hop = 0.22 * Math.abs(Math.cos(b)); p.dx = 0.3 * s;
+      p.legAmp = 0.5; p.legPh = b * 2;
+    },
+  },
+};
+
+/** 춤 팔 모양 -> [팔꿈치x, 팔꿈치y, 손x, 손y]. 팔꿈치가 null 이면 곧게 뻗은 팔. 어깨는 몸 옆. */
+function celHands(c, sd, r, sx, y) {
+  const p = c.ph + (sd > 0 ? 0 : Math.PI);
+  const shx = sx + sd * r * 0.75, shy = y + r * 0.1;
+  switch (c.arms) {
+    case 'up':
+      return [null, null, sx + sd * r * (0.95 + 0.18 * Math.sin(p)), y - r * (1.45 + 0.3 * Math.sin(p * 2))];
+    case 'pump':
+      return [null, null, sx + sd * r * 1.05, y + r * (0.15 - 0.95 * Math.sin(p))];
+    case 'out':
+      return [null, null, sx + sd * r * 1.75, y - r * 0.1 + Math.sin(p) * r * 0.2];
+    case 'moon':      // 한 손은 모자챙을 잡고, 한 손은 아래로 흔든다
+      return sd > 0
+        ? [sx + r * 1.15, y - r * 0.45, sx + r * 0.4, y - r * 1.3]
+        : [sx - r * 1.0, y + r * 0.55, sx - r * 0.85 + Math.sin(c.ph * 0.6) * r * 0.3, y + r * 0.95];
+    case 'kiki': {    // 번쩍 든 팔(곧게) <-> 허리에 짚은 팔(꺾어서)
+      const w = sd > 0 ? c.aw : 1 - c.aw;
+      return [
+        lerp(sx + sd * r * 1.3, sx + sd * r * 1.05, w), lerp(y + r * 0.2, y - r * 0.7, w),
+        lerp(sx + sd * r * 0.55, sx + sd * r * 1.35, w), lerp(y + r * 0.45, y - r * 1.55, w),
+      ];
     }
-    this.order = ['cheer', ...rest];
-    this.total = this.order.reduce((sum, n) => sum + CEREMONY[n].dur, 0);
+    case 'lasso':     // 오른손은 머리 위에서 올가미를 돌리고, 왼손은 고삐를 쥔다
+      if (sd > 0) {
+        const a = c.ph * 1.1;
+        return [sx + r * 1.0, y - r * 0.7, sx + r * 0.5 + Math.cos(a) * r * 0.85, y - r * 1.7 + Math.sin(a) * r * 0.4];
+      }
+      return [sx - r * 1.25, y + r * 0.4, sx - r * 1.05, y - r * 0.15 + Math.sin(c.ph * 2) * r * 0.15];
+    case 'robot': {   // 직각으로 꺾인 팔
+      const a1 = (((c.st + (sd > 0 ? 0 : 2)) % 4) * Math.PI) / 2;
+      const a2 = (((c.st * 3 + (sd > 0 ? 1 : 3)) % 4) * Math.PI) / 2;
+      const ex = shx + Math.cos(a1) * r * 0.75, ey = shy + Math.sin(a1) * r * 0.75;
+      return [ex, ey, ex + Math.cos(a2) * r * 0.7, ey + Math.sin(a2) * r * 0.7];
+    }
+    case 'disco': {   // 한 팔은 하늘, 반대 팔은 땅
+      const w = sd > 0 ? c.aw : 1 - c.aw;
+      return [
+        lerp(sx + sd * r * 0.95, sx + sd * r * 1.0, w), lerp(y + r * 0.55, y - r * 0.75, w),
+        lerp(sx + sd * r * 1.15, sx + sd * r * 1.3, w), lerp(y + r * 1.1, y - r * 1.8, w),
+      ];
+    }
+  }
+  return [null, null, shx, shy];
+}
+
+class Ceremony {
+  /** key: 춤 이름(생략하면 무작위) */
+  constructor(key) {
+    const keys = Object.keys(DANCES);
+    this.key = DANCES[key] ? key : keys[(Math.random() * keys.length) | 0];
+    this.name = DANCES[this.key].name;
+    if (this.key === 'freestyle') {
+      // 막춤: 첫 동작은 만세 점프, 나머지는 매번 섞어서
+      const rest = Object.keys(CEREMONY).filter((n) => n !== 'cheer');
+      for (let i = rest.length - 1; i > 0; i--) {
+        const j = (Math.random() * (i + 1)) | 0;
+        [rest[i], rest[j]] = [rest[j], rest[i]];
+      }
+      this.order = ['cheer', ...rest];
+      this.total = this.order.reduce((sum, n) => sum + CEREMONY[n].dur, 0);
+    }
     this.p = {};
   }
 
@@ -91,13 +218,20 @@ class Ceremony {
   pose(t) {
     const p = this.p;
     p.h = 0; p.rot = 0; p.flipX = 1; p.sq = 0; p.dx = 0; p.hop = 0; p.arms = ''; p.bobSpeed = 9;
+    p.aw = 0; p.st = 0; p.legSw = undefined; p.legAmp = undefined; p.legPh = 0;
     p.ph = t * 14;                                      // 팔 흔드는 박자
-    let u = t % this.total, m = CEREMONY[this.order[0]];
-    for (const n of this.order) {
-      if (u < CEREMONY[n].dur) { m = CEREMONY[n]; break; }
-      u -= CEREMONY[n].dur;
+    if (this.key === 'freestyle') {
+      let u = t % this.total, m = CEREMONY[this.order[0]];
+      for (const n of this.order) {
+        if (u < CEREMONY[n].dur) { m = CEREMONY[n]; break; }
+        u -= CEREMONY[n].dur;
+      }
+      m.f(u / m.dur, p);
+    } else {
+      DANCES[this.key].f(t, p);
+      const ramp = clamp(t / 0.5, 0, 1);                // 춤은 제자리에서 서서히 커진다
+      p.dx *= ramp; p.h *= ramp; p.rot *= ramp; p.hop *= ramp;
     }
-    m.f(u / m.dur, p);
     return p;
   }
 }
@@ -561,6 +695,7 @@ class RaceGame {
       }
       this.ceremony = new Ceremony();
       this.celT = 0;
+      if (this.winner) { this.winner.dance = this.ceremony.key; }
       this.phase = 'done';
       this.finishedAt = this.time;
       if (this.winner) this.order.unshift(this.winner);
@@ -1750,7 +1885,10 @@ class RaceGame {
     if (!ghost && air < 0.25) {
       c.strokeStyle = `hsl(${R.hue},55%,38%)`;
       c.lineWidth = r * 0.34; c.lineCap = 'round';
-      const sw = strug ? Math.sin(this.time * 30) * r * 0.9 : Math.sin(R.bob) * r * 0.55;
+      const sw = strug ? Math.sin(this.time * 30) * r * 0.9
+        : cel && cel.legSw !== undefined ? cel.legSw * r
+        : cel && cel.legAmp !== undefined ? Math.sin(cel.legPh) * r * cel.legAmp
+        : Math.sin(R.bob) * r * 0.55;
       c.beginPath();
       c.moveTo(sx - r * 0.28, y + r * 0.55); c.lineTo(sx - r * 0.28 + sw, y + r * 1.05);
       c.moveTo(sx + r * 0.28, y + r * 0.55); c.lineTo(sx + r * 0.28 - sw, y + r * 1.05);
@@ -1994,21 +2132,15 @@ class RaceGame {
         c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
       }
     }
-    // 세레모니 팔: 만세 / 번갈아 휘두르기 / 양옆으로 쭉
+    // 세레모니 팔 (춤마다 모양이 다르다)
     if (cel && cel.arms) {
       c.strokeStyle = dark;
-      c.lineWidth = r * 0.36; c.lineCap = 'round';
+      c.lineWidth = r * 0.36; c.lineCap = 'round'; c.lineJoin = 'round';
       for (const sd of [-1, 1]) {
-        const p = cel.ph + (sd > 0 ? 0 : Math.PI);
-        let hx, hy;
-        if (cel.arms === 'up') {
-          hx = sx + sd * r * (0.95 + 0.18 * Math.sin(p)); hy = y - r * (1.45 + 0.3 * Math.sin(p * 2));
-        } else if (cel.arms === 'pump') {
-          hx = sx + sd * r * 1.05; hy = y + r * (0.15 - 0.95 * Math.sin(p));
-        } else {
-          hx = sx + sd * r * 1.75; hy = y - r * 0.1 + Math.sin(p) * r * 0.2;
-        }
-        c.beginPath(); c.moveTo(sx + sd * r * 0.75, y + r * 0.1); c.lineTo(hx, hy); c.stroke();
+        const [ex, ey, hx, hy] = celHands(cel, sd, r, sx, y);
+        c.beginPath(); c.moveTo(sx + sd * r * 0.75, y + r * 0.1);
+        if (ex !== null) c.lineTo(ex, ey);
+        c.lineTo(hx, hy); c.stroke();
         c.fillStyle = `hsl(${R.hue},95%,66%)`;
         c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
       }
@@ -2113,7 +2245,7 @@ class WinHero {
       dash: 0, jump: 0, stomp: null, heldBy: null, flight: null, carry: null,
       punch: 0, hurt: 0, dizzy: 0, squash: 0, fear: 0, spin: 0,
     });
-    this.cer = new Ceremony();
+    this.cer = new Ceremony(runner.dance);              // 레이스 끝에서 추던 그 춤
     this.t = 0;
     this.last = performance.now();
     this.running = true;
