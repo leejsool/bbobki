@@ -18,7 +18,7 @@ const el = {
   stage: $('stage'), hudClass: $('hud-class'), hudAlive: $('hud-alive'),
   hudLap: $('hud-lap'), btnQuit: $('btn-quit'),
   killFeed: $('kill-feed'), eventToast: $('event-toast'), banner: $('stage-banner'), countdown: $('countdown'),
-  confetti: $('confetti'), winHero: $('win-hero'),
+  confetti: $('confetti'), winHero: $('win-hero'), winPeek: $('win-peek'), winPeekText: $('win-peek-text'),
   winMeta: $('win-meta'), winName: $('win-name'), winSub: $('win-sub'),
   btnAgain: $('btn-again'), btnHome: $('btn-home'),
   sndPick: $('snd-pick'), sndRace: $('snd-race'),
@@ -276,8 +276,23 @@ function showWin(R, order, cls) {
   Sound.play('win');
   confettiRun();
   if (!hero) hero = new WinHero(el.winHero);
+  hidePeek();
   hero.start(R);          // 화면이 보인 뒤에 시작해야 캔버스 크기가 잡힌다
 }
+
+/* ---------- 구석의 비밀 버튼: 눌러야만 지금 추는 춤의 이름이 보인다 ---------- */
+let peekTimer = 0;
+function hidePeek() {
+  clearTimeout(peekTimer);
+  el.winPeekText.classList.remove('show');
+}
+el.winPeek.onclick = () => {
+  if (!hero || !hero.cer) return;
+  el.winPeekText.textContent = hero.cer.name;
+  el.winPeekText.classList.add('show');
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(hidePeek, 2500);
+};
 
 /* ---------- 폭죽 ---------- */
 let confettiRaf = 0;
@@ -322,8 +337,8 @@ el.btnStart.onclick = startRace;
 el.sndPick.onclick = toggleSound;
 el.sndRace.onclick = toggleSound;
 el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
-el.btnAgain.onclick = () => { confettiStop(); hero && hero.stop(); startRace(); };
-el.btnHome.onclick = () => { confettiStop(); hero && hero.stop(); show('pick'); };
+el.btnAgain.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); startRace(); };
+el.btnHome.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); show('pick'); };
 
 Sound.load();
 renderSound();

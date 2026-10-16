@@ -228,4 +228,18 @@ h1{
 }
 .win-sub{margin:10px 0 0; color:var(--dim); font-size:14px}
 .win-actions{display:flex; gap:12px; justify-content:center; margin-top:34px; flex-wrap:wrap}
+.win-peek{
+  position:absolute; z-index:5; right:calc(6px + env(safe-area-inset-right)); bottom:calc(6px + env(safe-area-inset-bottom));
+  width:48px; height:48px; border:0; border-radius:50%; background:transparent;
+  color:rgba(255,255,255,.1); font-size:20px; cursor:default;
+  -webkit-tap-highlight-color:transparent;
+}
+.win-peek:active{color:rgba(255,255,255,.35)}
+.win-peek-text{
+  position:absolute; z-index:5; right:calc(56px + env(safe-area-inset-right)); bottom:calc(16px + env(safe-area-inset-bottom));
+  padding:5px 14px; border-radius:999px; font-size:15px; font-weight:700; color:#fff;
+  background:rgba(10,14,32,.82); border:1px solid rgba(255,255,255,.2);
+  opacity:0; transform:translateX(8px); transition:opacity .25s, transform .25s; pointer-events:none;
+}
+.win-peek-text.show{opacity:1; transform:none}
 .win-actions .btn-go{width:auto; padding:0 40px; min-height:62px}

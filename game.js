@@ -24,6 +24,9 @@ function distToSeg(px, py, ax, ay, bx, by) {
 
 /** 괴물 혀가 닿는 범위(화면 폭 비율)와 끌어당기는 속도(화면 폭/초) */
 const HUNT_RANGE = 0.58;
+/** 벽이 슬금슬금 나오는 정도: 이 시간(초)이 지나면 시간 몫이 다 찬다 / 끝날 무렵 화면 폭의 몇 배까지 */
+const CREEP_SECONDS = 32;
+const CREEP_REACH = 0.11;
 const REEL = 0.40;
 
 /** 뛰어넘을 수 있는 '낮은' 장애물. 벽과 해머는 못 넘는다. */
@@ -754,8 +757,12 @@ class RaceGame {
     const m = this.maw, W = this.W, r = this.r;
     const h1 = clamp(heat, 0, 1);
     m.t += dt;
-    m.baseF = 0.025 + 0.04 * h1;
-    m.peakF = 0.17 + 0.06 * h1;
+    // 벽(앞니)은 시간이 갈수록, 사람이 줄수록 조금씩 앞으로 나온다 -> 끝날 무렵엔 제법 가깝다
+    const n = this.runners.length;
+    const gone = n > 1 ? 1 - (this.alive - 1) / (n - 1) : 1;           // 0(시작) ~ 1(한 명 남음)
+    const prog = clamp(0.5 * (this.raceT / CREEP_SECONDS) + 0.5 * gone, 0, 1);
+    m.baseF = 0.025 + 0.03 * h1 + CREEP_REACH * prog;
+    m.peakF = Math.max(0.17 + 0.06 * h1, m.baseF + 0.07);
     m.alarmX = -Infinity;
     let target = m.baseF, advance = 0.5, retreat = 0.22;
 
