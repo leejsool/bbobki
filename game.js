@@ -51,12 +51,14 @@ function hash32(s) {
   for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
   return h;
 }
-const EARS = ['none', 'dog', 'cat', 'fox', 'panda'];
+// 몸 옆에 늘어지던 강아지 귀는 팔다리를 단 뒤로 옛 팔처럼 보여서 뺐다 (칸 수는 그대로 두어 다른 아이 생김새는 안 바뀐다)
+const EARS = ['none', 'none', 'cat', 'fox', 'panda'];
 const MOUTHS = ['none', 'smile', 'open'];
 const EYES = ['dot', 'big', 'oval', 'dot'];
 /* 꾸밈: 귀가 있는 아이는 귀를 가리는 모자를 쓰지 않는다 */
-const ACCS_BARE = ['none', 'cap', 'beanie', 'glasses', 'scarf', 'headband', 'bow', 'cap', 'scarf'];
-const ACCS_EARS = ['none', 'glasses', 'scarf', 'bow', 'headband', 'scarf'];
+/* 남학교라 리본 자리에 넥타이를 둔다 (칸 위치는 그대로라 다른 아이 꾸밈은 안 바뀐다) */
+const ACCS_BARE = ['none', 'cap', 'beanie', 'glasses', 'scarf', 'headband', 'tie', 'cap', 'scarf'];
+const ACCS_EARS = ['none', 'glasses', 'scarf', 'tie', 'headband', 'scarf'];
 function looksOf(name) {
   const h = hash32(name);
   const h2 = hash32(name + '#');           // 꾸밈은 따로 섞어서 귀·꼬리와 짝지어지지 않게 한다
@@ -2163,7 +2165,7 @@ class RaceGame {
    */
   limbsOf(R, cel, st) {
     const q = this._limb || (this._limb = { fl: [0, 0, 0], fr: [0, 0, 0], al: [0, 0], ar: [0, 0], el: [0, 0], er: [0, 0] });
-    q.kn = 0; q.hip = 0.3; q.sh = SHO_X; q.hl = ''; q.hr = ''; q.skipR = false;
+    q.kn = 0; q.hip = 0.3; q.sh = SHO_X; q.hl = ''; q.hr = '';
     q.el[0] = -1; q.el[1] = 0.35; q.er[0] = 1; q.er[1] = 0.35;
 
     if (cel) {
@@ -2218,7 +2220,12 @@ class RaceGame {
         set(q.ar, 1.08 + 0.34 * s, 0.7 - 0.14 * Math.abs(s));
       }
     }
-    if (R.punch > 0) q.skipR = true;                                      // 주먹 쥔 팔은 따로 그린다
+    if (R.punch > 0 && !st.ghost) {                                       // 주먹: 오른팔을 어깨에서 위->아래로 크게 휘두른다
+      const k = 1 - R.punch / R.punchT;                                   // 0 -> 1
+      const ang = -1.15 + k * 2.3, reach = 0.8 + 0.42 * Math.sin(k * Math.PI);
+      set(q.ar, SHO_X + Math.cos(ang) * reach, SHO_Y + Math.sin(ang) * reach);
+      q.er[0] = 1; q.er[1] = 0.6; q.hr = 'fist';
+    }
     return q;
   }
 
@@ -2261,7 +2268,6 @@ class RaceGame {
   drawArms(c, R, q, sx, y, r) {
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const sd of [-1, 1]) {
-      if (sd > 0 && q.skipR) continue;
       const t = sd < 0 ? q.al : q.ar, hint = sd < 0 ? q.el : q.er, shape = sd < 0 ? q.hl : q.hr;
       const shx = sd * q.sh;
       const [ex, ey] = bend2(shx, SHO_Y, t[0], t[1], ARM, ARM, hint[0], hint[1]);
@@ -2284,7 +2290,7 @@ class RaceGame {
         c.strokeStyle = skin; c.lineWidth = r * 0.2; c.stroke();
       }
       c.fillStyle = skin;
-      c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
+      c.beginPath(); c.arc(hx, hy, r * (shape === 'fist' ? 0.4 : 0.3), 0, Math.PI * 2); c.fill();
       c.strokeStyle = INK; c.lineWidth = 1.6; c.stroke();
     }
   }
@@ -2293,7 +2299,7 @@ class RaceGame {
   drawGear(c, R, sx, y, r, prop) {
     const L = R.look;
     const A = `hsl(${L.accHue},85%,60%)`, A2 = `hsl(${L.accHue},75%,40%)`;
-    const acc = prop === 'fedora' && (L.acc === 'cap' || L.acc === 'beanie' || L.acc === 'bow' || L.acc === 'headband') ? 'none' : L.acc;
+    const acc = prop === 'fedora' && (L.acc === 'cap' || L.acc === 'beanie' || L.acc === 'headband') ? 'none' : L.acc;
     c.lineCap = 'round'; c.lineJoin = 'round';
     switch (acc) {
       case 'cap':
@@ -2323,18 +2329,34 @@ class RaceGame {
         c.stroke();
         break;
       }
-      case 'bow':
-        c.fillStyle = A;
+      case 'tie': {                                                       // 넥타이 (흰 깃 + 매듭 + 달릴 때 살랑이는 끝)
+        const tx = sx + r * 0.06, ty = y + r * 0.7;                     // 입과 떨어지게 몸 아래쪽에 맨다
+        const sw = Math.sin(R.bob * 1.7) * r * 0.08;
+        c.fillStyle = '#f4f6ff';                                          // 셔츠 깃
+        c.strokeStyle = 'rgba(0,0,0,.25)'; c.lineWidth = 1;
         for (const s of [-1, 1]) {
           c.beginPath();
-          c.moveTo(sx - r * 0.42, y - r * 0.9);
-          c.lineTo(sx - r * 0.42 + s * r * 0.44, y - r * 1.16);
-          c.lineTo(sx - r * 0.42 + s * r * 0.44, y - r * 0.68);
-          c.closePath(); c.fill();
+          c.moveTo(tx, ty + r * 0.06); c.lineTo(tx + s * r * 0.42, ty - r * 0.14); c.lineTo(tx + s * r * 0.34, ty + r * 0.2);
+          c.closePath(); c.fill(); c.stroke();
         }
-        c.fillStyle = A2;
-        c.beginPath(); c.arc(sx - r * 0.42, y - r * 0.9, r * 0.12, 0, Math.PI * 2); c.fill();
+        c.fillStyle = A;                                                  // 넥타이 몸
+        c.beginPath();
+        c.moveTo(tx - r * 0.12, ty + r * 0.1); c.lineTo(tx + r * 0.12, ty + r * 0.1);
+        c.lineTo(tx + r * 0.22 + sw, ty + r * 0.56); c.lineTo(tx + sw, ty + r * 0.74); c.lineTo(tx - r * 0.22 + sw, ty + r * 0.56);
+        c.closePath(); c.fill();
+        c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.2; c.stroke();
+        c.save(); c.clip();                                               // 사선 줄무늬
+        c.strokeStyle = A2; c.lineWidth = r * 0.09; c.lineCap = 'butt';
+        c.beginPath();
+        for (const k of [0.28, 0.46, 0.64]) { c.moveTo(tx - r * 0.35, ty + r * k); c.lineTo(tx + r * 0.35, ty + r * (k - 0.2)); }
+        c.stroke();
+        c.restore();
+        c.fillStyle = A2;                                                 // 매듭
+        c.beginPath();
+        c.moveTo(tx - r * 0.17, ty - r * 0.06); c.lineTo(tx + r * 0.17, ty - r * 0.06); c.lineTo(tx + r * 0.11, ty + r * 0.16); c.lineTo(tx - r * 0.11, ty + r * 0.16);
+        c.closePath(); c.fill();
         break;
+      }
       case 'scarf': {
         const fl = Math.sin(R.bob * 1.7) * r * 0.16;
         c.strokeStyle = A2; c.lineWidth = r * 0.2;                        // 뒤로 날리는 자락
@@ -2362,7 +2384,7 @@ class RaceGame {
     let sx = R.x - this.camX;
     if (sx < -90 || sx > this.W + 90) return;
     const r0 = this.r;                                           // 부딪히는 반지름
-    const r = ghost ? r0 : r0 * BODY;                            // 그리는 몸통 반지름 (얼굴·팔다리는 모두 이 크기 기준)
+    const r = r0 * BODY;                                         // 그리는 몸통 반지름 (얼굴·팔다리는 모두 이 크기 기준)
     const hurt = !ghost && R.hurt > 0 ? clamp(R.hurt / 0.55, 0, 1) : 0;   // 맞은 직후 1 -> 0
     if (hurt) sx += Math.sin(this.time * 70) * r * 0.14 * hurt;             // 부르르 떤다
     if (!ghost && R.heldBy) sx += Math.sin(this.time * 45) * r * 0.1;       // 버둥버둥
@@ -2380,7 +2402,7 @@ class RaceGame {
     const sqz = !ghost ? Math.max(clamp(R.squash / 0.35, 0, 1), R.carry ? 0.5 : 0, cel ? cel.sq : 0) : 0;   // 밟혀/무거워 납작
     const hop = ghost || carried || cel ? 0 : Math.abs(Math.sin(R.bob)) * r0 * 0.36;
     // 몸통은 땅에서 띄워 다리가 보이게 한다. 춤출 때는 발은 그대로 두고 몸만 오르내린다
-    const y = R.y - hop - h + sqz * r * 0.3 + (ghost ? 0 : (cel ? cel.by : 0) * r - LIFT * r0);
+    const y = R.y - hop - h + sqz * r * 0.3 + (cel ? cel.by : 0) * r - LIFT * r0;
 
     // 그림자 (뜰수록 작아진다)
     if (!ghost && !R.heldBy) {
@@ -2423,7 +2445,8 @@ class RaceGame {
     const L = R.look;
     const dark = `hsl(${R.hue},70%,42%)`;
     const prop = cel ? cel.prop : '';
-    const limb = ghost ? null : this.limbsOf(R, cel, { air, dz, scared, strug, sqz });
+    // 탈락해 사라지는 아이도 같은 몸으로 그린다 (팔다리는 기절한 듯 축 늘어뜨린다)
+    const limb = this.limbsOf(R, cel, { air, dz: dz || ghost, scared, strug, sqz, ghost });
 
     // 다리
     if (limb) this.drawLegs(c, R, limb, sx, y, r, prop === 'fedora');
@@ -2476,13 +2499,7 @@ class RaceGame {
     if (L.ears !== 'none') {
       const panda = L.ears === 'panda';
       c.fillStyle = panda ? '#232842' : dark;
-      if (L.ears === 'dog') {
-        for (const s of [-1, 1]) {
-          c.beginPath();
-          c.ellipse(sx + s * r * 0.86, y + r * 0.08, r * 0.3, r * 0.66, s * 0.32, 0, Math.PI * 2);
-          c.fill();
-        }
-      } else if (panda) {
+      if (panda) {
         c.strokeStyle = '#fff';                        // 짙은 배경에 묻히지 않게 흰 테두리
         c.lineWidth = Math.max(1.5, r * 0.1);
         for (const s of [-1, 1]) {
@@ -2671,7 +2688,7 @@ class RaceGame {
     c.restore();
 
     // 모자·목도리, 춤 소품
-    if (!ghost) this.drawGear(c, R, sx, y, r, prop);
+    this.drawGear(c, R, sx, y, r, prop);
 
     // 맞거나 기절하면 머리 위로 별이 빙글빙글
     const starK = Math.max(hurt > 0.1 ? Math.min(hurt * 2, 1) : 0, dz ? Math.min(R.dizzy / 0.35, 1) : 0);
@@ -2698,21 +2715,12 @@ class RaceGame {
       }
     }
 
-    // 휘두르는 팔
+    // 주먹이 쓸고 지나간 자리 (팔은 아래 drawArms 에서 어깨에 붙여 그린다)
     if (!ghost && R.punch > 0) {
       const k = 1 - R.punch / R.punchT;                 // 0 -> 1
-      const ang = -1.15 + k * 2.3;
-      const len = r * (1.05 + Math.sin(k * Math.PI) * 1.15);
-      const ax = sx + Math.cos(ang) * len, ay = y + Math.sin(ang) * len;
-      c.strokeStyle = 'rgba(255,255,255,.4)';           // 쓸고 지나간 자리
+      c.strokeStyle = 'rgba(255,255,255,.4)';
       c.lineWidth = r * 0.26; c.lineCap = 'round';
-      c.beginPath(); c.arc(sx, y + r * 0.1, r * 1.9, -1.15, ang); c.stroke();
-      c.strokeStyle = dark;
-      c.lineWidth = r * 0.36; c.lineCap = 'round';
-      c.beginPath(); c.moveTo(sx, y + r * 0.1); c.lineTo(ax, ay); c.stroke();
-      c.fillStyle = `hsl(${R.hue},95%,66%)`;
-      c.beginPath(); c.arc(ax, ay, r * 0.44, 0, Math.PI * 2); c.fill();
-      c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.5; c.stroke();
+      c.beginPath(); c.arc(sx + SHO_X * r, y + SHO_Y * r, r * 1.35, -1.15, -1.15 + k * 2.3); c.stroke();
     }
 
     // 팔과 손 (달리기, 점프, 버둥거림, 들어 올리기, 춤 모두 여기서 그린다)
