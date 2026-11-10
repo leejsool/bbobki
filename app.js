@@ -21,7 +21,7 @@ const el = {
   confetti: $('confetti'), winHero: $('win-hero'), winPeek: $('win-peek'), winPeekText: $('win-peek-text'),
   winMeta: $('win-meta'), winName: $('win-name'), winSub: $('win-sub'),
   btnAgain: $('btn-again'), btnHome: $('btn-home'),
-  sndPick: $('snd-pick'), sndRace: $('snd-race'),
+  sndPick: $('snd-pick'), sndRace: $('snd-race'), btnSpeed: $('btn-speed'),
 };
 
 let roster = null;        // { fetchedAt, grades:[...] }
@@ -42,6 +42,23 @@ function toggleSound() {
   Sound.setOn(!Sound.on);
   renderSound();
   if (Sound.on) Sound.play('countdown');   // 켰으면 들려 준다
+}
+
+/* ---------- 2배속 ---------- */
+let fast = false;
+try { fast = localStorage.getItem('bbobki.fast') === '1'; } catch (e) { /* 사생활 보호 모드 등 */ }
+
+function renderSpeed() {
+  el.btnSpeed.classList.toggle('on', fast);
+  el.btnSpeed.textContent = fast ? '2배속 ▶▶' : '2배속';
+  el.btnSpeed.setAttribute('aria-pressed', fast ? 'true' : 'false');
+  if (game) game.speed = fast ? 2 : 1;
+}
+
+function toggleSpeed() {
+  fast = !fast;
+  try { localStorage.setItem('bbobki.fast', fast ? '1' : '0'); } catch (e) { /* 무시 */ }
+  renderSpeed();
 }
 
 /* ---------- 화면 아래 안내 ---------- */
@@ -236,7 +253,7 @@ function runGame(cls) {
         if (cause !== 'maw') Sound.play('out');       // 괴물에게 먹힌 소리는 게임 쪽에서 낸다
         el.hudAlive.textContent = alive;
         const d = document.createElement('div');
-        d.textContent = cause === 'maw' ? `👹 ${R.name} 꿀꺽!` : `${R.name} 탈락`;
+        d.textContent = cause === 'maw' ? `👹 ${R.name} 꿀꺽!` : cause === 'mine' ? `💥 ${R.name} 지뢰!` : `${R.name} 탈락`;
         el.killFeed.appendChild(d);
         setTimeout(() => d.remove(), 3000);
         while (el.killFeed.children.length > 6) el.killFeed.firstChild.remove();
@@ -248,6 +265,7 @@ function runGame(cls) {
       onThrow(A, B) {
         showToast(`💪 ${A.name}${josa(A.name, '이', '가')} ${B.name}${josa(B.name, '을', '를')} 들어서 던집니다!`);
       },
+      onMine() { showToast('💣 지뢰 발견! 빨간 원 밖으로 피해야 합니다!', 2600, true); },
       onMaw(kind, prey) {
         if (kind === 'wake') showToast('👹 왼쪽 끝에서 괴물이 깨어났습니다! 뒤처지면 먹힙니다!', 3200, true);
         else if (kind === 'hunt') showToast(`🩸 ${prey.name}${josa(prey.name, '이', '가')} 기절! 괴물이 노립니다!`, 2400, true);
@@ -259,6 +277,7 @@ function runGame(cls) {
     game.opts.onWin = (R, order) => showWin(R, order, cls);
   }
 
+  game.speed = fast ? 2 : 1;
   game.start(cls.members, title);
 }
 
@@ -336,10 +355,12 @@ el.btnRetry.onclick = boot;
 el.btnStart.onclick = startRace;
 el.sndPick.onclick = toggleSound;
 el.sndRace.onclick = toggleSound;
+el.btnSpeed.onclick = toggleSpeed;
 el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
 el.btnAgain.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); startRace(); };
 el.btnHome.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); show('pick'); };
 
 Sound.load();
 renderSound();
+renderSpeed();
 boot();

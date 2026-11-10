@@ -20,6 +20,7 @@ const Sound = {
   GAP: {
     jump: 70, land: 90, out: 70, punch: 180, boom: 140, countdown: 120,
     stomp: 160, lift: 160, throw: 160, thud: 160, growl: 700, gulp: 120, slurp: 200,
+    mine: 150, blast: 110,
   },
 
   /* ---------- 준비 ---------- */
@@ -155,6 +156,21 @@ const Sound = {
     boom() {
       this.tone({ type: 'sine', f0: 130, f1: 36, t: 0.32, gain: 0.72 });
       this.hiss({ t: 0.15, gain: 0.3, f0: 900, f1: 90 });
+    },
+
+    /* 지뢰가 드러났다: 삑, 삑, 삑삑삑 (점점 빨라진다. 터지기까지 0.9초쯤) */
+    mine() {
+      [0, 0.3, 0.52, 0.68, 0.79].forEach((at, i) => {
+        this.tone({ type: 'square', f0: 1480 + i * 90, t: 0.06, gain: 0.26, at });
+      });
+    },
+
+    /* 지뢰 폭발: 묵직한 쿵 + 흩어지는 파편 */
+    blast() {
+      this.tone({ type: 'sine', f0: 170, f1: 30, t: 0.5, gain: 1.0 });
+      this.tone({ type: 'triangle', f0: 90, f1: 34, t: 0.36, gain: 0.5, at: 0.02 });
+      this.hiss({ t: 0.42, gain: 0.95, f0: 3200, f1: 110 });
+      this.hiss({ t: 0.7, gain: 0.22, f0: 700, f1: 60, at: 0.08 });
     },
 
     /* 괴물 으르렁: 낮게 떨리는 울림 */

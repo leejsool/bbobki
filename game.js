@@ -1,8 +1,9 @@
 /* =========================================================
    game.js  -  폴가이즈식 생존 레이스
 
-   달리는 아이들이 회전바 / 해머 / 굴러오는 공 / 벽 틈을
+   달리는 아이들이 회전바 / 해머 / 굴러오는 공 / 벽 틈 / 지뢰를
    피하면서 전진한다. 부딪히면 그 자리에서 탈락.
+   뒤에서는 괴물 벽이 꼬리를 바짝 쫓아온다.
    마지막 한 명이 남으면 끝.
    ========================================================= */
 
@@ -25,9 +26,12 @@ function distToSeg(px, py, ax, ay, bx, by) {
 /** 괴물 혀가 닿는 범위(화면 폭 비율)와 끌어당기는 속도(화면 폭/초) */
 const HUNT_RANGE = 0.58;
 /** 벽이 슬금슬금 나오는 정도: 이 시간(초)이 지나면 시간 몫이 다 찬다 / 끝날 무렵 화면 폭의 몇 배까지 */
-const CREEP_SECONDS = 32;
-const CREEP_REACH = 0.11;
+const CREEP_SECONDS = 26;
+const CREEP_REACH = 0.13;
 const REEL = 0.40;
+/** 벽이 꼬리를 쫓을 때 남겨 두는 거리 / 덮칠 때 더 나오는 거리 (캐릭터 반지름의 몇 배) */
+const CHASE_GAP = 2.8;
+const LUNGE = [6.5, 10];
 
 /** 뛰어넘을 수 있는 '낮은' 장애물. 벽과 해머는 못 넘는다. */
 const LOW = new Set(['spinner', 'ball', 'saw']);
@@ -35,10 +39,10 @@ const LOW = new Set(['spinner', 'ball', 'saw']);
 /* ---------- 구간(스테이지) 구성 ---------- */
 const STAGES = [
   { at: 0,     label: '출발!',            kinds: ['ball'] },
-  { at: 2080,  label: '구간 2 · 회전바',   kinds: ['ball', 'spinner'] },
-  { at: 4960,  label: '구간 3 · 해머 지대', kinds: ['spinner', 'hammer', 'ball'] },
-  { at: 8400,  label: '구간 4 · 좁은 문',   kinds: ['wall', 'hammer', 'spinner'] },
-  { at: 12400, label: '구간 5 · 난장판',    kinds: ['wall', 'hammer', 'spinner', 'ball', 'saw'] },
+  { at: 1300,  label: '구간 2 · 회전바',   kinds: ['ball', 'spinner'] },
+  { at: 3000,  label: '구간 3 · 해머 지대', kinds: ['spinner', 'hammer', 'ball'] },
+  { at: 4800,  label: '구간 4 · 좁은 문',   kinds: ['wall', 'hammer', 'spinner', 'ball'] },
+  { at: 6800,  label: '구간 5 · 난장판',    kinds: ['wall', 'hammer', 'spinner', 'ball', 'saw'] },
 ];
 
 /** 이름에서 생김새를 정한다 - 같은 학생은 늘 같은 모습으로 나온다 */
@@ -49,36 +53,116 @@ function hash32(s) {
 }
 const EARS = ['none', 'dog', 'cat', 'fox', 'panda'];
 const MOUTHS = ['none', 'smile', 'open'];
+const EYES = ['dot', 'big', 'oval', 'dot'];
+/* 꾸밈: 귀가 있는 아이는 귀를 가리는 모자를 쓰지 않는다 */
+const ACCS_BARE = ['none', 'cap', 'beanie', 'glasses', 'scarf', 'headband', 'bow', 'cap', 'scarf'];
+const ACCS_EARS = ['none', 'glasses', 'scarf', 'bow', 'headband', 'scarf'];
 function looksOf(name) {
   const h = hash32(name);
+  const h2 = hash32(name + '#');           // 꾸밈은 따로 섞어서 귀·꼬리와 짝지어지지 않게 한다
+  const ears = EARS[h % EARS.length];
+  const accs = ears === 'none' ? ACCS_BARE : ACCS_EARS;
+  const spots = ((h >>> 7) % 4) === 0;
   return {
-    ears: EARS[h % EARS.length],
+    ears,
     tail: ((h >>> 3) % 3) === 0,
     tailStripes: ((h >>> 21) % 2) === 0,   // 꼬리가 있는 아이 중 절반은 줄무늬
-    spots: ((h >>> 7) % 4) === 0,
+    spots,
     mouth: MOUTHS[(h >>> 11) % MOUTHS.length],
     wink: ((h >>> 17) % 4) === 0,
+    acc: accs[h2 % accs.length],
+    accHue: ((h2 >>> 5) % 12) * 30,
+    eyes: EYES[(h2 >>> 9) % EYES.length],
+    blush: ((h2 >>> 12) % 2) === 0,
+    belly: ((h2 >>> 14) % 3) !== 0,
+    stripes: !spots && ((h2 >>> 17) % 4) === 0,
   };
+}
+
+/* ---------- 팔다리 ----------
+   몸은 공 하나지만 팔(어깨-팔꿈치-손)과 다리(엉덩이-무릎-발)는 두 마디로 꺾인다.
+   자세는 '손과 발을 어디에 둘지'만 정하고, 팔꿈치와 무릎은 아래 함수가 알아서 꺾는다. */
+const BODY = 0.84;                // 몸통은 부딪히는 크기보다 조금 작게 그리고, 그만큼 팔다리를 길게 뺀다
+const GROUND = 1.7;               // 몸 중심에서 발바닥(땅)까지 (아래 길이는 모두 '그린 몸통 반지름'의 몇 배)
+const LIFT = GROUND * BODY - 1.05; // 그래서 몸통이 땅에서 뜨는 높이 (부딪히는 반지름의 몇 배)
+const HIP_Y = 0.62, LEG = 0.56;   // 엉덩이 높이, 허벅지·종아리 길이
+const SHO_X = 0.96, SHO_Y = 0.1, ARM = 0.62;   // 어깨: 몸통(얼굴) 가장자리에 붙는다 / 위팔·아래팔 길이
+const INK = 'rgba(8,11,28,.6)';   // 팔다리 테두리 (몸 앞에 겹쳐도 또렷하게)
+
+/** 두 마디 관절: (ax,ay)에서 (bx,by)까지 잇되, 꺾이는 마디가 (hx,hy) 쪽을 향한다. 닿지 않으면 쭉 늘어난다 */
+function bend2(ax, ay, bx, by, l1, l2, hx, hy) {
+  const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy) || 1e-6;
+  if (d >= l1 + l2) { const k = l1 / (l1 + l2); return [ax + dx * k, ay + dy * k]; }
+  const dd = Math.max(d, Math.abs(l1 - l2) + 1e-6);
+  const a = (l1 * l1 - l2 * l2 + dd * dd) / (2 * dd);
+  const hgt = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+  const mx = ax + (dx / d) * a, my = ay + (dy / d) * a;
+  const nx = -dy / d, ny = dx / d;
+  const s = nx * hx + ny * hy >= 0 ? 1 : -1;
+  return [mx + nx * hgt * s, my + ny * hgt * s];
 }
 
 /* ---------- 우승 세레모니 (춤) ----------
    우승하면 아래 춤 가운데 하나를 무작위로 골라 춘다.
-   자세 필드 (길이 단위는 캐릭터 반지름)
-     h 높이, dx 옆으로 움직인 거리, rot 회전(rad), flipX 좌우 뒤집기(1~-1, 도는 느낌),
-     sq 납작, hop 통통, arms 팔 모양, aw 팔 올림 정도(0~1), st 로봇 동작 번호,
-     legSw / legAmp+legPh 다리 벌림(없으면 달리기 다리) */
+   자세 필드 (길이 단위는 캐릭터 반지름, +x 오른쪽 / +y 아래)
+     dx 선 자리가 옆으로 움직인 거리, h 뛰어오른 높이, rot 몸 기울기(rad), flipX 보는 방향(1~-1, 도는 느낌), sq 납작
+     bx/by 발은 그대로 두고 몸통만 옮긴 거리 (by>0 이면 무릎을 굽혀 앉는다 -> 발이 땅에 붙은 채 몸이 튕긴다)
+     fl/fr 왼발·오른발 [선 자리에서 옆으로, 든 높이, 뒤꿈치를 든 정도 0~1]
+     al/ar 왼손·오른손 [몸 중심에서 x, y],  el/er 팔꿈치가 향하는 쪽
+     kn 무릎 방향 (0 바깥으로 = 정면, 1 앞으로 = 옆모습),  hip/sh 엉덩이·어깨 너비 (옆모습이면 좁게)
+     hl/hr 손 모양 ('thumb' 엄지척, 'L' 검지는 위·엄지는 몸 중심 쪽, 'point' 검지, 'glove' 흰 장갑),  prop 소품 ('shades', 'fedora')
+     look 얼굴을 돌린 정도 (-1~1),  face 표정 ('smug' 메롱) */
 const TAU = Math.PI * 2;
 const squashAt = (fr) => 0.45 * Math.max(0, 1 - Math.min(fr, 1 - fr) * 9);   // 뛰기 직전·착지 순간
+const smooth01 = (k) => { const c = clamp(k, 0, 1); return c * c * (3 - 2 * c); };
 
-/* 막춤의 재료: 모든 동작은 땅에서 시작해 땅에서 끝나므로 이어 붙여도 튀지 않는다 */
+function poseReset(p) {
+  p.dx = 0; p.h = 0; p.rot = 0; p.flipX = 1; p.sq = 0; p.bx = 0; p.by = 0;
+  p.fl = [-0.34, 0, 0]; p.fr = [0.34, 0, 0];
+  p.al = [-1.12, 0.7]; p.ar = [1.12, 0.7];
+  p.el = [-1, 0.35]; p.er = [1, 0.35];
+  p.kn = 0; p.hip = 0.3; p.sh = SHO_X; p.look = 0;
+  p.hl = ''; p.hr = ''; p.prop = ''; p.face = ''; p.bobSpeed = 9;
+  return p;
+}
+const POSE_NUM = ['dx', 'h', 'rot', 'flipX', 'sq', 'bx', 'by', 'kn', 'hip', 'sh', 'look'];
+const POSE_VEC = ['fl', 'fr', 'al', 'ar', 'el', 'er'];
+const POSE_TAG = ['hl', 'hr', 'prop', 'face', 'bobSpeed'];
+
+/* 자주 쓰는 팔 모양 */
+const armsUp = (p, ph) => {                     // 만세 (살짝 흔든다)
+  p.al = [-1.15 - 0.16 * Math.sin(ph), -1.4 - 0.2 * Math.sin(ph * 2)]; p.el = [-1, -0.2];
+  p.ar = [1.15 + 0.16 * Math.sin(ph), -1.4 - 0.2 * Math.sin(ph * 2 + 1)]; p.er = [1, -0.2];
+};
+const armsOut = (p, ph) => {                    // 양팔 벌리기
+  p.al = [-2.05, -0.1 + 0.18 * Math.sin(ph)]; p.ar = [2.05, -0.1 - 0.18 * Math.sin(ph)];
+};
+const armsPump = (p, ph) => {                   // 주먹을 번갈아 치켜든다
+  p.al = [-1.25, 0.0 - 0.95 * Math.sin(ph)]; p.el = [-1, 0.5];
+  p.ar = [1.25, 0.0 + 0.95 * Math.sin(ph)]; p.er = [1, 0.5];
+};
+
+/* 막춤의 재료: 모든 동작은 땅에서 시작해 땅에서 끝나므로 이어 붙여도 튀지 않는다. k 는 동작 진행도 0~1 */
 const CEREMONY = {
-  cheer:     { dur: 1.7, f(k, p) { const fr = (k * 3) % 1; p.h = 2.7 * Math.sin(Math.PI * fr); p.sq = squashAt(fr); p.arms = 'up'; } },
-  flip:      { dur: 1.2, f(k, p) { p.h = 3.6 * Math.sin(Math.PI * k); p.rot = -TAU * k; p.sq = squashAt(k); } },
-  dance:     { dur: 1.9, f(k, p) { const s = Math.sin(k * TAU * 4); p.rot = 0.3 * s; p.hop = 0.5 * Math.abs(s); p.arms = 'pump'; p.bobSpeed = 12; } },
-  twirl:     { dur: 1.3, f(k, p) { p.h = 2.3 * Math.sin(Math.PI * k); p.flipX = Math.cos(TAU * 2 * k); p.arms = 'out'; p.sq = squashAt(k); } },
-  zoom:      { dur: 1.8, f(k, p) { const ph = k * TAU * 2; p.dx = 1.4 * Math.sin(ph); p.flipX = clamp(Math.cos(ph) * 5, -1, 1); p.hop = 0.55 * Math.abs(Math.sin(k * TAU * 8)); p.arms = 'pump'; p.bobSpeed = 20; } },
-  cartwheel: { dur: 1.4, f(k, p) { p.h = 2.1 * Math.sin(Math.PI * k); p.rot = TAU * k; p.dx = 1.2 * Math.sin(Math.PI * k); p.arms = 'out'; p.sq = squashAt(k); } },
-  bigjump:   { dur: 1.4, f(k, p) { p.h = 3.9 * Math.sin(Math.PI * k); p.arms = 'up'; p.sq = squashAt(k); } },
+  cheer:     { dur: 1.7, f(k, p) { const fr = (k * 3) % 1; p.h = 2.7 * Math.sin(Math.PI * fr); p.sq = squashAt(fr); armsUp(p, k * 40); } },
+  flip:      { dur: 1.2, f(k, p) { p.h = 3.6 * Math.sin(Math.PI * k); p.rot = -TAU * k; p.sq = squashAt(k); armsUp(p, 0); } },
+  dance:     { dur: 1.9, f(k, p) {
+    const b = k * TAU * 4, s = Math.sin(b);
+    p.rot = 0.2 * s; p.bx = 0.22 * s; p.by = 0.1 + 0.1 * Math.cos(b * 2); armsPump(p, b); p.bobSpeed = 12;
+    (s > 0 ? p.fl : p.fr)[1] = 0.25 * Math.abs(s);
+  } },
+  twirl:     { dur: 1.3, f(k, p) { p.h = 2.3 * Math.sin(Math.PI * k); p.flipX = Math.cos(TAU * 2 * k); armsOut(p, k * 20); p.sq = squashAt(k); } },
+  zoom:      { dur: 1.8, f(k, p) {
+    const ph = k * TAU * 2, st = k * TAU * 8;
+    p.dx = 1.4 * Math.sin(ph); p.flipX = clamp(Math.cos(ph) * 5, -1, 1); p.kn = 1; p.hip = 0.16; p.look = 0.6;
+    p.fl = [0.4 * Math.sin(st), 0.3 * Math.max(0, Math.cos(st)), 0]; p.fr = [-0.4 * Math.sin(st), 0.3 * Math.max(0, -Math.cos(st)), 0];
+    p.by = 0.05 * Math.cos(st * 2); armsPump(p, st); p.bobSpeed = 20;
+  } },
+  cartwheel: { dur: 1.4, f(k, p) {
+    p.h = 2.1 * Math.sin(Math.PI * k); p.rot = TAU * k; p.dx = 1.2 * Math.sin(Math.PI * k); p.sq = squashAt(k);
+    armsOut(p, 0); p.fl[0] = -0.55; p.fr[0] = 0.55;
+  } },
+  bigjump:   { dur: 1.4, f(k, p) { p.h = 3.9 * Math.sin(Math.PI * k); p.sq = squashAt(k); armsUp(p, k * 30); p.fl[0] = -0.5; p.fr[0] = 0.5; } },
 };
 
 /* 춤마다 박자에 맞춰 자세를 만든다. t 는 춤을 시작하고 흐른 시간(초) */
@@ -86,117 +170,152 @@ const DANCES = {
   // 막춤: 위의 동작을 매번 섞어서 이어 붙인다 (Ceremony 가 따로 처리)
   freestyle: { name: '막춤' },
 
-  // 문워크: 앞을 보고 미끄러지듯 뒤로 간다. 끝에서 휙 돌아 반대쪽으로 또 뒤로.
+  // 문워크: 옆모습. 한 발은 발끝으로 서서 버티고, 다른 발은 바닥에 붙인 채 뒤로 쭉 민다. 번갈아 하면 몸이 뒤로 흘러간다.
+  // 끝에서 한 바퀴 휙 돌고 발끝으로 서서 멈춘 뒤, 반대쪽으로 또 뒤로.
   moonwalk: {
     name: '문워크',
     f(t, p) {
-      const u = t % 4.4, ph = t * 9;
-      p.arms = 'moon'; p.rot = -0.1; p.hop = 0.14 * Math.abs(Math.sin(ph));
-      p.legAmp = 0.45; p.legPh = ph;
-      if (u < 1.9) {                                        // 오른쪽을 보고 왼쪽으로 스르르
-        p.dx = 1.4 * Math.cos((Math.PI * u) / 1.9);
-      } else if (u < 2.2) {                                 // 휙 돈다
-        const k = (u - 1.9) / 0.3;
-        p.dx = -1.4; p.flipX = Math.cos(Math.PI * k); p.h = 0.9 * Math.sin(Math.PI * k); p.arms = 'up';
-      } else if (u < 4.1) {                                 // 왼쪽을 보고 오른쪽으로 스르르
-        p.dx = -1.4 * Math.cos((Math.PI * (u - 2.2)) / 1.9); p.flipX = -1;
-      } else {
-        const k = (u - 4.1) / 0.3;
-        p.dx = 1.4; p.flipX = -Math.cos(Math.PI * k); p.h = 0.9 * Math.sin(Math.PI * k); p.arms = 'up';
+      const T = 5.6, GL = 2.0, STEP = 0.469;                // STEP: 버티는 발이 땅에 박혀 보이는 보폭 시간
+      const u = t % T, back = u >= T / 2, v = back ? u - T / 2 : u;
+      const face = back ? -1 : 1;
+      p.prop = 'fedora'; p.flipX = face; p.look = 0.85; p.kn = 1; p.hip = 0.12;
+      p.hr = 'glove';                                                             // 한 손에만 낀 흰 장갑
+      if (v < GL) {
+        const s = v / STEP, i = Math.floor(s), f = s - i;
+        const toe = [-0.34 + 0.68 * f, 0, 1];                                     // 발끝으로 버티는 발 (몸이 뒤로 가니 앞으로 온다)
+        const flat = [0.34 - 0.68 * f, 0, 0];                                     // 바닥을 쓸며 뒤로 미는 발
+        if (i % 2) { p.fl = flat; p.fr = toe; } else { p.fl = toe; p.fr = flat; }
+        p.dx = face * (1.45 - 2.9 * (v / GL));
+        p.rot = 0.08; p.by = 0.05 + 0.03 * Math.sin(Math.PI * f);
+        const sw = Math.cos(Math.PI * s);                                         // 팔은 몸 옆에서 앞뒤로, 다리와 엇갈려
+        p.al = [-1.12 + 0.3 * sw, 0.62 - 0.12 * Math.abs(sw)]; p.el = [-1, 0.2];
+        p.ar = [1.12 - 0.3 * sw, 0.62 - 0.12 * Math.abs(sw)]; p.er = [1, 0.2];
+      } else if (v < GL + 0.4) {                                                   // 제자리에서 한 바퀴
+        const k = (v - GL) / 0.4;
+        p.dx = -face * 1.45; p.flipX = face * Math.cos(TAU * k);
+        p.fl = [-0.1, 0, 1]; p.fr = [0.1, 0, 1]; p.by = -0.1; p.look = 0;
+        p.al = [-1.05, 0.62]; p.ar = [1.05, 0.62];                                 // 팔을 몸에 붙이고 돈다
+      } else {                                                                     // 발끝으로 서서 딱 멈춘다
+        const k = (v - GL - 0.4) / (T / 2 - GL - 0.4);
+        p.dx = -face * 1.45;
+        p.fl = [-0.16, 0, 1]; p.fr = [0.14, 0, 1];
+        p.by = -0.17 + 0.05 * smooth01((k - 0.7) / 0.3); p.rot = -0.07;
+        p.ar = [1.12, -0.74]; p.er = [1, 0.2];                                     // 모자챙을 바깥쪽에서 잡는다 (얼굴을 가리지 않게)
+        p.al = [-1.75, 0.5]; p.el = [-1, 0.3]; p.hl = 'point';                     // 반대 팔은 뒤 아래로 쭉
       }
     },
   },
 
-  // 삐끼삐끼: 무릎을 튕기며 한 팔은 번쩍, 한 팔은 허리에. 박자마다 바꾼다.
+  // 삐끼삐끼: 양손 엄지척을 가슴 앞에서 번갈아 올렸다 내리며 골반을 좌우로 튕긴다.
+  // 여덟 박자 뒤에는 몸을 틀어 한 손은 허리에, 한 손은 귀 옆에서 까딱까딱.
   pikipiki: {
     name: '삐끼삐끼',
     f(t, p) {
-      const b = t * Math.PI * 6, s = Math.sin(b / 2);
-      p.arms = 'kiki'; p.aw = clamp(s * 3, -1, 1) * 0.5 + 0.5;
-      p.hop = 0.42 * Math.abs(Math.sin(b)); p.sq = 0.12 * (1 - Math.abs(Math.sin(b)));
-      p.rot = 0.13 * s; p.dx = 0.45 * s; p.bobSpeed = 16;
+      const u = t * 2.3, i = Math.floor(u), c = i % 24;
+      const sway = Math.sin(Math.PI * u);
+      p.bx = 0.17 * sway; p.rot = -0.07 * sway; p.by = 0.05 + 0.07 * Math.abs(Math.cos(Math.PI * u));
+      p.bobSpeed = 14;
+      if (c < 8 || (c >= 12 && c < 20)) {
+        const a = Math.cos(Math.PI * u);
+        p.hl = p.hr = 'thumb';
+        p.al = [-1.3, 0.05 + 0.36 * a]; p.el = [-1, 0.8];
+        p.ar = [1.3, 0.05 - 0.36 * a]; p.er = [1, 0.8];
+      } else {
+        const d = c < 12 ? 1 : -1;
+        const flick = [d * (1.3 + 0.16 * Math.sin(TAU * 2 * u)), -0.62 + 0.1 * Math.cos(TAU * 2 * u)];
+        const hipHand = [-d * 1.0, 0.56];
+        p.look = 0.6 * d; p.bx = 0.2 * d + 0.06 * sway;
+        if (d > 0) { p.ar = flick; p.hr = 'thumb'; p.er = [1, 0.1]; p.al = hipHand; p.el = [-1, -0.1]; p.fl[2] = 1; }
+        else { p.al = flick; p.hl = 'thumb'; p.el = [-1, 0.1]; p.ar = hipHand; p.er = [1, -0.1]; p.fr[2] = 1; }
+      }
     },
   },
 
-  // 말춤: 한 손은 머리 위에서 올가미를 돌리고, 다리를 크게 벌려 달리듯 통통.
+  // 말춤: 다리를 넓게 벌리고 말 타듯 통통. 발은 오-왼-오-오 / 왼-오-왼-왼 으로 구른다.
+  // 앞 여덟 박자는 손목을 겹쳐 고삐를 쥐고, 뒤 여덟 박자는 머리 위로 올가미를 돌리며 옆으로 달린다.
   horse: {
     name: '말춤',
     f(t, p) {
-      const b = t * Math.PI * 4;
-      p.arms = 'lasso'; p.hop = 0.5 * Math.abs(Math.sin(b)); p.rot = 0.09 * Math.sin(b);
-      p.dx = 0.7 * Math.sin(b / 2); p.sq = 0.1 * Math.abs(Math.cos(b));
-      p.legAmp = 1.0; p.legPh = b;
+      const u = t * 2.2, i = Math.floor(u), f = u - i;
+      const side = [1, -1, 1, 1, -1, 1, -1, -1][i % 8];
+      const k = Math.sin(Math.PI * f);
+      p.prop = 'shades'; p.bobSpeed = 13;
+      p.fl[0] = -0.54; p.fr[0] = 0.54;
+      (side < 0 ? p.fl : p.fr)[1] = 0.42 * k;                // 구르는 발: 박자 사이에 들었다가 박자에 쿵
+      p.by = 0.1 + 0.07 * (1 + Math.cos(TAU * f));           // 박자마다 푹 꺼진다
+      p.bx = -0.1 * side * k; p.rot = -0.05 * side * k;
+      const bob = 0.13 * Math.cos(TAU * f);
+      if (Math.floor(i / 8) % 2 === 0) {                     // 고삐: 겹친 손목을 위아래로 까딱
+        p.al = [0.14, 0.66 + bob]; p.el = [-1, 0.6];
+        p.ar = [-0.14, 0.74 + bob]; p.er = [1, 0.6];
+      } else {                                               // 올가미
+        const a = TAU * u;
+        p.ar = [0.85 + 0.5 * Math.cos(a), -1.5 + 0.2 * Math.sin(a)]; p.er = [1, 0];
+        p.al = [-0.1, 0.7 + bob]; p.el = [-1, 0.6];
+        p.dx = 0.9 * Math.sin(((u % 8) / 8) * TAU);
+      }
     },
   },
 
-  // 로봇춤: 뚝뚝 끊어서 움직인다.
+  // L을 가져가: 한 손은 이마에 L, 한 손은 배를 잡고, 한 발로 콩콩 뛰며 다리를 양옆으로 번갈아 찬다.
+  takel: {
+    name: 'L을 가져가',
+    f(t, p) {
+      const u = t * 2.5, i = Math.floor(u), f = u - i, s = i % 2 ? 1 : -1;      // s: 이번에 차는 다리 쪽
+      const k = Math.sin(Math.PI * f);
+      p.face = 'smug'; p.bobSpeed = 16;
+      p.ar = [0.42, -0.6]; p.er = [1, -0.3]; p.hr = 'L';                        // 이마에 붙인 L (검지는 위로, 엄지는 이마를 가로질러 안쪽으로)
+      p.al = [-0.1, 0.74]; p.el = [-1, 0.6];                                    // 배를 잡은 손
+      const stand = s < 0 ? p.fr : p.fl, kick = s < 0 ? p.fl : p.fr;
+      stand[0] = -s * 0.1;
+      kick[0] = s * (0.36 + 0.95 * k); kick[1] = 0.05 + 0.78 * k;          // 옆으로 쭉 뻗어 찬다
+      p.h = 0.2 * k; p.by = 0.1 * (1 - k);
+      p.bx = -s * 0.16 * k; p.rot = -s * 0.17 * k;
+      p.dx = 0.55 * Math.sin((u * Math.PI) / 4);
+    },
+  },
+
+  // 로봇춤: 팔을 직각으로 꺾은 자세를 뚝뚝 끊어서 바꾼다.
   robot: {
     name: '로봇춤',
     f(t, p) {
-      const st = Math.floor(t * 4);
-      p.st = st; p.arms = 'robot';
-      p.rot = [0.16, -0.16, 0, 0.1][st % 4];
-      p.dx = [-0.8, 0.8, 0, 0.5][st % 4];
-      p.legSw = (st % 2 ? 1 : -1) * 0.45;
+      const u = t * 3.2, st = Math.floor(u) % 6, f = u - Math.floor(u);
+      const UP = (sd) => [sd * 1.58, -0.52], DN = (sd) => [sd * 1.58, 0.72], IN = (sd) => [sd * 0.34, 0.72], FW = (sd) => [sd * 0.96, -1.14];
+      const POSES = [
+        [DN(-1), UP(1), 0.1, -0.12], [UP(-1), DN(1), -0.1, 0.12], [UP(-1), UP(1), 0, 0],
+        [IN(-1), UP(1), 0.08, 0.1], [DN(-1), IN(1), -0.08, -0.1], [FW(-1), DN(1), 0, 0.14],
+      ];
+      const P = POSES[st];
+      p.al = P[0]; p.ar = P[1]; p.rot = P[2]; p.bx = P[3];
+      p.el = [-1, 0]; p.er = [1, 0];
+      p.by = 0.09 * Math.max(0, 1 - f * 5);                  // 자세가 바뀌는 순간 덜컥
+      if (st % 3 === 1) p.fl[0] = -0.56; else if (st % 3 === 2) p.fr[0] = 0.56;
+      p.look = [0.5, -0.5, 0, 0.5, -0.5, 0][st];
     },
   },
 
-  // 디스코: 한 팔은 하늘로, 한 팔은 땅으로. 어깨를 흔들며 번갈아.
+  // 디스코: 한 손은 허리에, 한 손은 하늘을 찔렀다가 반대쪽 허리로 내리꽂는다. 그다음엔 두 손을 굴리며 스텝.
   disco: {
     name: '디스코',
     f(t, p) {
-      const b = t * Math.PI * 2.4, s = Math.sin(b);
-      p.arms = 'disco'; p.aw = clamp(s * 3, -1, 1) * 0.5 + 0.5;
-      p.rot = 0.14 * s; p.hop = 0.22 * Math.abs(Math.cos(b)); p.dx = 0.3 * s;
-      p.legAmp = 0.5; p.legPh = b * 2;
+      const u = t * 2, i = Math.floor(u), f = u - i, c = i % 8;
+      p.by = 0.07 + 0.06 * Math.cos(TAU * f); p.bobSpeed = 12;
+      if (c < 4) {
+        const up = c % 2 === 0;
+        p.ar = up ? [1.3, -1.5] : [-0.5, 0.92]; p.er = up ? [1, 0.3] : [0.6, 1]; p.hr = 'point';
+        p.al = [-1.0, 0.56]; p.el = [-1, -0.1];
+        p.bx = up ? -0.2 : 0.2; p.rot = up ? 0.1 : -0.1; p.look = up ? 0.5 : -0.4;
+        (up ? p.fr : p.fl)[2] = 0.9;
+      } else {
+        const a = TAU * u, s = c % 2 ? 1 : -1, k = Math.sin(Math.PI * f);
+        p.al = [-0.22 + 0.28 * Math.cos(a), 0.68 + 0.2 * Math.sin(a)]; p.el = [-1, 0.6];
+        p.ar = [0.22 - 0.28 * Math.cos(a), 0.68 - 0.2 * Math.sin(a)]; p.er = [1, 0.6];
+        p.bx = 0.22 * s * k; p.rot = -0.08 * s * k;
+        (s > 0 ? p.fl : p.fr)[1] = 0.22 * k;
+      }
     },
   },
 };
-
-/** 춤 팔 모양 -> [팔꿈치x, 팔꿈치y, 손x, 손y]. 팔꿈치가 null 이면 곧게 뻗은 팔. 어깨는 몸 옆. */
-function celHands(c, sd, r, sx, y) {
-  const p = c.ph + (sd > 0 ? 0 : Math.PI);
-  const shx = sx + sd * r * 0.75, shy = y + r * 0.1;
-  switch (c.arms) {
-    case 'up':
-      return [null, null, sx + sd * r * (0.95 + 0.18 * Math.sin(p)), y - r * (1.45 + 0.3 * Math.sin(p * 2))];
-    case 'pump':
-      return [null, null, sx + sd * r * 1.05, y + r * (0.15 - 0.95 * Math.sin(p))];
-    case 'out':
-      return [null, null, sx + sd * r * 1.75, y - r * 0.1 + Math.sin(p) * r * 0.2];
-    case 'moon':      // 한 손은 모자챙을 잡고, 한 손은 아래로 흔든다
-      return sd > 0
-        ? [sx + r * 1.15, y - r * 0.45, sx + r * 0.4, y - r * 1.3]
-        : [sx - r * 1.0, y + r * 0.55, sx - r * 0.85 + Math.sin(c.ph * 0.6) * r * 0.3, y + r * 0.95];
-    case 'kiki': {    // 번쩍 든 팔(곧게) <-> 허리에 짚은 팔(꺾어서)
-      const w = sd > 0 ? c.aw : 1 - c.aw;
-      return [
-        lerp(sx + sd * r * 1.3, sx + sd * r * 1.05, w), lerp(y + r * 0.2, y - r * 0.7, w),
-        lerp(sx + sd * r * 0.55, sx + sd * r * 1.35, w), lerp(y + r * 0.45, y - r * 1.55, w),
-      ];
-    }
-    case 'lasso':     // 오른손은 머리 위에서 올가미를 돌리고, 왼손은 고삐를 쥔다
-      if (sd > 0) {
-        const a = c.ph * 1.1;
-        return [sx + r * 1.0, y - r * 0.7, sx + r * 0.5 + Math.cos(a) * r * 0.85, y - r * 1.7 + Math.sin(a) * r * 0.4];
-      }
-      return [sx - r * 1.25, y + r * 0.4, sx - r * 1.05, y - r * 0.15 + Math.sin(c.ph * 2) * r * 0.15];
-    case 'robot': {   // 직각으로 꺾인 팔
-      const a1 = (((c.st + (sd > 0 ? 0 : 2)) % 4) * Math.PI) / 2;
-      const a2 = (((c.st * 3 + (sd > 0 ? 1 : 3)) % 4) * Math.PI) / 2;
-      const ex = shx + Math.cos(a1) * r * 0.75, ey = shy + Math.sin(a1) * r * 0.75;
-      return [ex, ey, ex + Math.cos(a2) * r * 0.7, ey + Math.sin(a2) * r * 0.7];
-    }
-    case 'disco': {   // 한 팔은 하늘, 반대 팔은 땅
-      const w = sd > 0 ? c.aw : 1 - c.aw;
-      return [
-        lerp(sx + sd * r * 0.95, sx + sd * r * 1.0, w), lerp(y + r * 0.55, y - r * 0.75, w),
-        lerp(sx + sd * r * 1.15, sx + sd * r * 1.3, w), lerp(y + r * 1.1, y - r * 1.8, w),
-      ];
-    }
-  }
-  return [null, null, shx, shy];
-}
 
 class Ceremony {
   /** key: 춤 이름(생략하면 무작위) */
@@ -214,27 +333,37 @@ class Ceremony {
       this.order = ['cheer', ...rest];
       this.total = this.order.reduce((sum, n) => sum + CEREMONY[n].dur, 0);
     }
-    this.p = {};
+    this.raw = poseReset({});
+    this.p = poseReset({});             // 가만히 선 자세에서 춤으로 스르르 넘어간다
+    this.lastT = 0;
   }
 
   /** t초째의 자세. 같은 객체를 다시 채워 돌려준다 */
   pose(t) {
-    const p = this.p;
-    p.h = 0; p.rot = 0; p.flipX = 1; p.sq = 0; p.dx = 0; p.hop = 0; p.arms = ''; p.bobSpeed = 9;
-    p.aw = 0; p.st = 0; p.legSw = undefined; p.legAmp = undefined; p.legPh = 0;
-    p.ph = t * 14;                                      // 팔 흔드는 박자
+    t = Math.max(0, t);                 // 첫 프레임의 시각이 살짝 앞설 때가 있다
+    const q = poseReset(this.raw), p = this.p;
     if (this.key === 'freestyle') {
       let u = t % this.total, m = CEREMONY[this.order[0]];
       for (const n of this.order) {
         if (u < CEREMONY[n].dur) { m = CEREMONY[n]; break; }
         u -= CEREMONY[n].dur;
       }
-      m.f(u / m.dur, p);
+      m.f(u / m.dur, q);
     } else {
-      DANCES[this.key].f(t, p);
-      const ramp = clamp(t / 0.5, 0, 1);                // 춤은 제자리에서 서서히 커진다
-      p.dx *= ramp; p.h *= ramp; p.rot *= ramp; p.hop *= ramp;
+      DANCES[this.key].f(t, q);
     }
+    // 자세가 바뀌는 순간 뚝 끊기지 않게 아주 짧게 이어 준다 (크게 도는 동작은 그대로 따른다)
+    const a = 1 - Math.exp(-Math.max(0, t - this.lastT) / 0.045);
+    this.lastT = t;
+    for (const key of POSE_NUM) {
+      const d = q[key] - p[key];
+      p[key] = key === 'rot' && Math.abs(d) > 2 ? q[key] : p[key] + d * a;
+    }
+    for (const key of POSE_VEC) {
+      const s = q[key], d = p[key];
+      for (let i = 0; i < d.length; i++) d[i] += ((s[i] || 0) - d[i]) * a;
+    }
+    for (const key of POSE_TAG) p[key] = q[key];
     return p;
   }
 }
@@ -246,6 +375,7 @@ class RaceGame {
     this.opts = opts;
     this.raf = 0;
     this.running = false;
+    this.speed = 1;                        // 진행 배속 (1 또는 2)
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
   }
@@ -314,6 +444,8 @@ class RaceGame {
     this.obstacles = [];
     this.dropCd = rnd(3, 6);
     this.frontier = 620;
+    this.mineFrontier = 760;               // 다음 지뢰를 묻을 자리
+    this.mineSeen = false;                 // 이번 판에 지뢰가 한 번이라도 드러났나
     this.order = [];                       // 탈락 역순 = 순위
     this.raceT = 0;                        // 출발하고 흐른 시간
     // 왼쪽 끝에서 다가오는 괴물. f 는 화면 폭에 대한 앞니(앞쪽 끝)의 위치 비율이라 창 크기가 바뀌어도 그대로다.
@@ -322,6 +454,8 @@ class RaceGame {
       f: -0.09, t: 0, cd: 0, hcd: 0, hold: 0,
       kind: '', prey: null, rage: 0, look: this.top + this.trackH / 2,
       baseF: 0.03, peakF: 0.2, alarmX: -Infinity,
+      full: 0, bite: false,                // 방금 한 입 물었다 (입이 차서 잠깐은 더 못 문다)
+      press: 0,                            // 압박 0~1: 한동안 아무도 탈락하지 않으면 꼬리 바로 뒤까지 따라붙는다
       tongue: 0, attached: false,          // 혀가 뻗은 정도 0~1 / 먹잇감을 붙잡았나
     };
     this.mawX = this.camX + this.maw.f * this.W;
@@ -348,12 +482,14 @@ class RaceGame {
         no: m.no,
         name: m.name,
         look: looksOf(m.name),
-        x: -col * this.r * 3.2,
+        x: -col * this.r * 4.2 + rnd(-0.6, 0.6) * this.r,
         y: this.top + this.trackH * ((inCol + 0.5) / per),
         vy: 0,
         alive: true,
         hue: (i * 360) / n + rnd(-8, 8),
-        speed: rnd(0.93, 1.09),            // 타고난 발 빠르기
+        speed: rnd(0.99, 1.01),              // 타고난 발 빠르기 (거의 같다. 앞뒤는 컨디션이 가른다)
+        pace: 1, paceTo: rnd(0.9, 1.1), paceCd: rnd(0.5, 3),   // 그때그때 달라지는 컨디션 (앞뒤가 계속 뒤바뀐다)
+        alarm: 0, react: rnd(0.15, 1.0),    // 괴물 경고를 듣고 도망치기까지 걸리는 시간
         skill: rnd(0.74, 1),               // 장애물 감지 능력
         bob: rnd(0, Math.PI * 2),
         targetY: 0,
@@ -403,7 +539,8 @@ class RaceGame {
     const now = performance.now();
     const dt = Math.min((now - this.last) / 1000, 1 / 24);
     this.last = now;
-    this.update(dt);
+    // 배속: 한 번에 크게 건너뛰면 장애물을 뚫고 지나가므로, 같은 걸음을 여러 번 밟는다
+    for (let i = 0; i < this.speed && this.running; i++) this.update(dt);
     this.draw();
   }
 
@@ -450,7 +587,9 @@ class RaceGame {
     /* --- 난이도: 거리 + 안 죽고 버틴 시간 --- */
     const stall = clamp((this.time - this.lastElimAt - 4) / 10, 0, 1);
     const diff = clamp(this.dist / 14000, 0, 1);
-    const heat = clamp(diff * 0.75 + stall * 0.6 + (this.alive <= 4 ? 0.45 : 0), 0, 1.35);
+    // 넷 이하로 줄면 막판 스퍼트. 처음부터 인원이 적은 반은 출발하자마자 끝나지 않게 서서히 올린다
+    const finale = this.alive <= 4 ? 0.45 * clamp(this.raceT / 10, 0, 1) : 0;
+    const heat = clamp(diff * 0.75 + stall * 0.6 + finale, 0, 1.35);
 
     this.raceT += dt;
     this.announceStage();
@@ -471,7 +610,7 @@ class RaceGame {
       if (this.dropCd <= 0) {
         const many = 1 + (Math.random() < heat * 0.9 ? 1 : 0);
         for (let i = 0; i < many; i++) {
-          const rad = this.r * rnd(1.3, 2.3);
+          const rad = this.r * rnd(1.2, 1.9);
           this.obstacles.push({
             kind: 'drop',
             x: rnd(tailX - 40, leadX + 320),
@@ -480,7 +619,7 @@ class RaceGame {
             t: 0, warn: rnd(0.45, 0.8), fall: 0.28, live: 0.5, landed: false,
           });
         }
-        this.dropCd = rnd(1.7, 3.4) / (0.65 + heat);
+        this.dropCd = rnd(1.3, 2.6) / (0.65 + heat);
       }
     }
 
@@ -488,11 +627,11 @@ class RaceGame {
     for (const o of this.obstacles) this.moveObstacle(o, dt, heat);
     const cullX = Math.min(this.camX, tailX) - 400;
     this.obstacles = this.obstacles.filter((o) =>
-      o.x > cullX && !(o.kind === 'drop' && o.t > o.warn + o.fall + o.live));
+      o.x > cullX && !o.popped && !(o.kind === 'drop' && o.t > o.warn + o.fall + o.live));
 
     /* --- 달리기 --- */
     const baseSpeed = 250 + 70 * diff;
-    const band = this.W * 0.40;      // 무리가 벌어질 수 있는 폭
+    const band = this.W * 0.46;      // 무리가 벌어질 수 있는 폭
     const hitNow = [];
 
     for (const R of this.runners) {
@@ -520,9 +659,15 @@ class RaceGame {
       } else {
         const zone = this.r * (maw.state === 'creep' ? 4.5 : 8);
         R.fear = clamp(1 - (R.x - this.mawX) / zone, 0, 1);
-        pull = R.fear * (dizzy ? 300 : 130);            // 기절하면 버티지 못하고 쑥쑥 끌려간다
+        pull = R.fear * (dizzy ? 300 : 60);             // 기절하면 버티지 못하고 쑥쑥 끌려간다
         if (maw.attached && maw.prey === R) pull = Math.max(pull, this.W * REEL);   // 혀에 감겨 끌려온다
-        if (R.x < maw.alarmX && !dizzy && !R.carry) R.dash = Math.max(R.dash, 0.5);
+        // 경고를 듣고 도망친다. 알아채는 데 걸리는 시간은 그때그때 달라서, 굼뜨면 덮칠 때 잡힌다
+        if (R.x < maw.alarmX && !dizzy && !R.carry) {
+          R.alarm += dt;
+          if (R.alarm >= R.react) R.dash = Math.max(R.dash, 0.5);
+        } else if (R.alarm > 0) {
+          R.alarm = 0; R.react = rnd(0.15, 1.0);
+        }
         if (R.fear > 0.5 && Math.random() < dt * 9) {   // 식은땀
           this.particles.push({
             x: R.x + rnd(-this.r, this.r), y: R.y - this.heightOf(R) - this.r * 0.9,
@@ -617,8 +762,11 @@ class RaceGame {
       // 앞으로. 뒤처질수록 빨라지고 앞서면 조금 느려져서
       // 무리가 한 화면에 머문다 -> 모두가 같은 장애물을 만난다.
       if (R.stun > 0) R.stun -= dt;
-      const sp = baseSpeed * R.speed
-        * (0.80 + lagRatio * 0.44)
+      R.paceCd -= dt;
+      if (R.paceCd <= 0) { R.paceCd = rnd(1.2, 3.5); R.paceTo = rnd(0.9, 1.1); }
+      R.pace += (R.paceTo - R.pace) * Math.min(1, dt * 1.5);
+      const sp = baseSpeed * R.speed * R.pace
+        * (0.84 + lagRatio * 0.36)
         * (R.dash > 0 ? 1.85 : 1)
         * (R.stun > 0 ? 0.35 : 1)
         * (dizzy ? 0.4 : 1)                       // 비틀거린다
@@ -644,16 +792,29 @@ class RaceGame {
 
       // 괴물 입에 닿으면 꿀꺽
       if (maw.state !== 'sleep' && R.x - this.mawX < this.r * 0.5) {
-        R.cause = 'maw';
-        hitNow.push(R);
-        continue;
+        if (maw.full > 0 && !dizzy && maw.prey !== R) {
+          // 입이 찼다: 이빨에 떠밀려 앞으로 튕겨 나간다
+          R.x = this.mawX + this.r * 0.5;
+          R.dash = Math.max(R.dash, 0.4);
+        } else {
+          R.cause = 'maw';
+          maw.full = 0.7; maw.bite = true;
+          hitNow.push(R);
+          continue;
+        }
       }
 
       // 충돌 (공중이면 낮은 장애물은 넘어간다. 벽과 해머는 못 넘는다)
       for (const o of this.obstacles) {
-        if (Math.abs(o.x - R.x) > 260) continue;
+        if (o.popped || Math.abs(o.x - R.x) > 260) continue;
         if ((R.jump > 0 || (R.stomp && R.stomp.t >= R.stomp.T1)) && LOW.has(o.kind)) continue;
-        if (this.hits(o, R)) { hitNow.push(R); break; }
+        if (this.hits(o, R)) {
+          R.cause = o.kind;
+          hitNow.push(R);
+          if (o.kind === 'ball') { o.popped = true; this.burst(o.x, o.y, 195, 12); }   // 공은 한 명을 맞히면 터진다
+          else if (o.kind === 'spinner' || o.kind === 'hammer') { o.cool = 0.5; o.w = -o.w; }   // 맞히면 반대로 튕긴다
+          break;
+        }
       }
     }
 
@@ -714,6 +875,7 @@ class RaceGame {
     R.deadAt = this.time;
     this.alive--;
     this.lastElimAt = this.time;
+    this.maw.press = Math.max(0, this.maw.press - 0.3);   // 누가 탈락하면 벽이 한숨 돌린다
     this.order.unshift(R);
     if (R.cause === 'maw') {
       // 꿀꺽: 괴물 쪽으로 빨려 들어가며 작아진다 (그리는 쪽에서 처리)
@@ -757,20 +919,38 @@ class RaceGame {
     const m = this.maw, W = this.W, r = this.r;
     const h1 = clamp(heat, 0, 1);
     m.t += dt;
+    if (m.full > 0) m.full -= dt;
+    if (m.bite) {                                       // 덮치다가 한 명 물었으면 거기서 멈춘다
+      m.bite = false;
+      if (m.state === 'snap') { m.state = 'creep'; m.t = 0; m.cd = rnd(2.4, 4) / (0.7 + 0.5 * heat); m.hcd = 0.8; }
+    }
     // 벽(앞니)은 시간이 갈수록, 사람이 줄수록 조금씩 앞으로 나온다 -> 끝날 무렵엔 제법 가깝다
     const n = this.runners.length;
     const gone = n > 1 ? 1 - (this.alive - 1) / (n - 1) : 1;           // 0(시작) ~ 1(한 명 남음)
     const prog = clamp(0.5 * (this.raceT / CREEP_SECONDS) + 0.5 * gone, 0, 1);
-    m.baseF = 0.025 + 0.03 * h1 + CREEP_REACH * prog;
-    m.peakF = Math.max(0.17 + 0.06 * h1, m.baseF + 0.07);
+    // 압박: 2초 넘게 아무도 탈락하지 않으면 차오른다. 다 차면 꼬리 바로 뒤까지 따라붙는다
+    if (m.state !== 'sleep') {
+      const quiet = this.time - this.lastElimAt;
+      m.press = clamp(m.press + (quiet > 1.5 ? dt / 3 : -dt / 8), 0, 1);
+    }
+    const chase = clamp(0.45 + 0.4 * prog + 0.5 * m.press, 0, 1);
+    let tailX = Infinity;                                              // 멀쩡히 달리는 아이 중 맨 뒤
+    for (const R of this.runners) {
+      if (R.alive && R.dizzy <= 0 && !R.heldBy && !R.flight && R.x < tailX) tailX = R.x;
+    }
+    const creepF = 0.025 + 0.03 * h1 + CREEP_REACH * prog;
+    const tailF = tailX < Infinity ? (tailX - this.camX - r * CHASE_GAP) / W : creepF;
+    m.baseF = clamp(Math.max(creepF, lerp(creepF, tailF, chase)), 0.02, 0.44);
+    m.peakF = m.baseF + (r * lerp(LUNGE[0], LUNGE[1], h1)) / W;
     m.alarmX = -Infinity;
-    let target = m.baseF, advance = 0.5, retreat = 0.22;
+    // 평소에는 천천히 다가오고 천천히 물러난다 (덮칠 때만 빠르다)
+    let target = m.baseF, advance = 0.1, retreat = m.f > m.baseF + 0.03 ? 0.12 : 0.05;
 
     switch (m.state) {
       case 'sleep':
         target = -0.09;
         if (this.raceT >= 4) {
-          m.state = 'creep'; m.t = 0; m.cd = rnd(7, 10); m.hcd = 0;
+          m.state = 'creep'; m.t = 0; m.cd = rnd(3, 4.5); m.hcd = 0;
           this.sfx('growl');
           this.shakeScreen(0.6, r * 0.12);
           if (this.opts.onMaw) this.opts.onMaw('wake');
@@ -794,7 +974,7 @@ class RaceGame {
           if (!prey) { m.state = 'creep'; m.t = 0; m.hcd = 0.8; break; }
           m.prey = prey;
         } else {
-          m.alarmX = this.camX + m.peakF * W + r * 5;
+          m.alarmX = this.camX + m.peakF * W + r * 2;
         }
         if (m.t >= (m.kind === 'hunt' ? 0.35 : 0.95)) {
           m.state = m.kind; m.t = 0; m.hold = 0; m.tongue = 0; m.attached = false;
@@ -805,10 +985,10 @@ class RaceGame {
 
       case 'snap':
         target = m.peakF; advance = 1.0;
-        m.alarmX = this.camX + m.peakF * W + r * 5;
+        m.alarmX = this.camX + m.peakF * W + r * 2;
         if (m.f >= m.peakF - 0.004) {
           m.hold += dt;
-          if (m.hold >= 0.4) { m.state = 'creep'; m.t = 0; m.cd = rnd(8, 13) / (0.7 + 0.5 * heat); m.hcd = 0.8; }
+          if (m.hold >= 0.4) { m.state = 'creep'; m.t = 0; m.cd = rnd(2.4, 4) / (0.7 + 0.5 * heat); m.hcd = 0.8; }
         }
         break;
 
@@ -879,11 +1059,25 @@ class RaceGame {
   spawnAhead(heat) {
     const limit = this.camX + this.W + 700;
     let guard = 0;
-    while (this.frontier < limit && guard++ < 12) {
+    const h1 = clamp(heat, 0, 1);
+    while (this.frontier < limit && guard++ < 16) {
       const kinds = STAGES[Math.max(this.stageIdx, 0)].kinds;
       this.obstacles.push(this.makeObstacle(pick(kinds), this.frontier, heat));
-      const gap = lerp(395, 250, clamp(heat, 0, 1)) * rnd(0.8, 1.22);
+      // 장애물 하나하나는 작게, 대신 촘촘하게 놓는다
+      const gap = lerp(225, 135, h1) * rnd(0.8, 1.22);
       this.frontier += gap;
+    }
+    // 지뢰: 바닥에 숨어 있다가 누가 다가오면 드러난다
+    guard = 0;
+    while (this.mineFrontier < limit && guard++ < 8) {
+      const rad = this.r * rnd(2.3, 3.0);
+      this.obstacles.push({
+        kind: 'mine',
+        x: this.mineFrontier + rnd(-70, 70),
+        y: rnd(this.top + rad * 0.5, this.bot - rad * 0.5),
+        rad, state: 'hidden', t: 0, fuse: rnd(0.85, 1.05),
+      });
+      this.mineFrontier += lerp(760, 340, h1) * rnd(0.6, 1.4);
     }
   }
 
@@ -897,7 +1091,7 @@ class RaceGame {
           const out = Hh * rnd(0.02, 0.1);
           return {
             kind, x, arms: 1, edge: true,
-            len: Hh * rnd(0.4, 0.55), thick: this.r * 0.95,
+            len: Hh * rnd(0.26, 0.38), thick: this.r * 0.9,
             y: side < 0 ? T - out : B + out,
             ang: rnd(0, Math.PI * 2),
             w: rnd(1.1, 1.9) * (Math.random() < 0.5 ? -1 : 1) * (0.85 + heat * 0.5),
@@ -907,15 +1101,15 @@ class RaceGame {
         const roll = Math.random();
         let arms, len, spin, thick;
         if (roll < 0.42) {
-          arms = 1; len = Hh * rnd(0.33, 0.47); spin = rnd(1.4, 2.3); thick = this.r * 0.85;
+          arms = 1; len = Hh * rnd(0.15, 0.23); spin = rnd(1.5, 2.4); thick = this.r * 0.8;
         } else if (roll < 0.72) {
-          arms = 1; len = Hh * rnd(0.13, 0.23); spin = rnd(3.0, 4.5); thick = this.r * 1.05;
+          arms = 1; len = Hh * rnd(0.09, 0.14); spin = rnd(3.0, 4.5); thick = this.r * 0.95;
         } else {
-          arms = 2; len = Hh * rnd(0.24, 0.35); spin = rnd(0.75, 1.35); thick = this.r * 0.8;
+          arms = 2; len = Hh * rnd(0.12, 0.18); spin = rnd(0.8, 1.4); thick = this.r * 0.75;
         }
         return {
           kind, x, arms, len, thick,
-          y: rnd(T + Hh * 0.25, B - Hh * 0.25),
+          y: rnd(T + Hh * 0.14, B - Hh * 0.14),
           ang: rnd(0, Math.PI * 2),
           w: spin * (Math.random() < 0.5 ? -1 : 1) * (0.85 + heat * 0.5),
         };
@@ -925,7 +1119,7 @@ class RaceGame {
           kind, x,
           y0: T + Hh * 0.5,
           amp: Hh * rnd(0.3, 0.47),
-          rad: this.r * rnd(1.6, 2.3),
+          rad: this.r * rnd(1.2, 1.7),
           ph: rnd(0, Math.PI * 2),
           w: rnd(1.7, 2.9) * (0.85 + heat * 0.5),
         };
@@ -942,7 +1136,7 @@ class RaceGame {
       case 'ball': {
         // 작을수록 가볍게 위아래로 크게 튕기고, 클수록 묵직하게 직진한다.
         const size = Math.random();
-        const rad = this.r * lerp(0.9, 2.5, size);
+        const rad = this.r * lerp(0.8, 1.7, size);
         return {
           kind, x: x + rnd(0, 220),
           y: rnd(T + rad, B - rad),
@@ -954,7 +1148,9 @@ class RaceGame {
       }
       case 'wall':
       default: {
-        const gapH = Math.max(this.r * 3.4, Hh * lerp(0.3, 0.15, clamp(heat, 0, 1)));
+        // 사람이 많이 남았을수록 문을 넓게 낸다 (문 앞에서 한꺼번에 탈락하지 않게)
+        const crowd = 1 + 0.6 * clamp((this.alive - 4) / 10, 0, 1);
+        const gapH = Math.max(this.r * 3.4, Hh * lerp(0.3, 0.15, clamp(heat, 0, 1))) * crowd;
         return {
           kind: 'wall', x,
           w: this.r * 1.3,
@@ -967,6 +1163,7 @@ class RaceGame {
   }
 
   moveObstacle(o, dt) {
+    if (o.cool > 0) o.cool -= dt;
     switch (o.kind) {
       case 'spinner': o.ang += o.w * dt; break;
       case 'hammer': o.ph += o.w * dt; break;
@@ -987,6 +1184,9 @@ class RaceGame {
           this.rings.push({ x: o.x, y: o.y, age: 0, life: 0.5, hue: o.hue, r0: o.rad });
         }
         break;
+      case 'mine':
+        this.stepMine(o, dt);
+        break;
       case 'wall':
         o.gapY += o.vy * dt;
         if (o.gapY < this.top + o.gapH * 0.55) { o.gapY = this.top + o.gapH * 0.55; o.vy *= -1; }
@@ -995,9 +1195,55 @@ class RaceGame {
     }
   }
 
+  /** 지뢰: 숨어 있다가 -> 누가 다가오면 드러나 깜빡이고 -> 잠시 뒤 터진다 */
+  stepMine(o, dt) {
+    const r = this.r;
+    if (o.state === 'hidden') {
+      const trig = o.rad + r * 1.8;
+      for (const R of this.runners) {
+        if (!R.alive || R.heldBy || R.flight) continue;
+        if (Math.abs(R.x - o.x) > trig || Math.hypot(R.x - o.x, R.y - o.y) > trig) continue;
+        o.state = 'armed'; o.t = 0;
+        this.sfx('mine');
+        if (!this.mineSeen) { this.mineSeen = true; if (this.opts.onMine) this.opts.onMine(); }
+        // 이미 원 안에 들어선 아이는 놀라서 내달린다
+        for (const O of this.runners) {
+          if (!O.alive || O.dizzy > 0 || O.carry || O.heldBy || O.flight) continue;
+          if (O.x > o.x - r && Math.hypot(O.x - o.x, O.y - o.y) < o.rad + r && Math.random() < 0.6) {
+            O.dash = Math.max(O.dash, 0.35);
+          }
+        }
+        break;
+      }
+      return;
+    }
+    o.t += dt;
+    if (o.state !== 'armed' || o.t < o.fuse) return;
+
+    // 쾅!
+    o.state = 'boom'; o.t = 0;
+    this.sfx('blast');
+    this.burst(o.x, o.y, 22, 26);
+    this.burst(o.x, o.y, 48, 12);
+    this.rings.push({ x: o.x, y: o.y, age: 0, life: 0.5, hue: 18, r0: o.rad * 0.5, grow: (o.rad / r) * 1.1, thick: 6 });
+    this.rings.push({ x: o.x, y: o.y, age: 0, life: 0.34, hue: 50, r0: r * 0.6, grow: (o.rad / r) * 0.8, thick: 4, white: true });
+    this.pows.push({ x: o.x, y: o.y - r * 0.6, age: 0, life: 0.5, size: r * 1.7, spikes: 11, text: '쾅!', ang: rnd(0, 6.28), hue: 22 });
+    this.shakeScreen(0.3, r * 0.45);
+    // 원 바로 밖에 있던 아이는 폭풍에 밀려난다 (탈락은 아니다)
+    for (const O of this.runners) {
+      if (!O.alive || O.heldBy || O.flight) continue;
+      const dx = O.x - o.x, dy = O.y - o.y, d = Math.hypot(dx, dy) || 1;
+      if (d < o.rad || d > o.rad * 1.8) continue;
+      const f = (1 - (d - o.rad) / (o.rad * 0.8)) * 520;
+      O.kx += (dx / d) * f * 0.6; O.ky += (dy / d) * f;
+      O.hurt = 0.4; O.stun = Math.max(O.stun, 0.15);
+    }
+  }
+
   /** 장애물의 현재 위치 기준 충돌 판정 */
   hits(o, R) {
     const pad = this.r;
+    if (o.cool > 0) return false;                       // 방금 누군가를 맞히고 튕겨 나가는 중
     switch (o.kind) {
       case 'spinner': {
         for (let k = 0; k < o.arms; k++) {
@@ -1018,6 +1264,9 @@ class RaceGame {
         // 떨어지는 막바지부터 착지 직후까지만 위험하다
         if (o.t < o.warn + o.fall * 0.72) return false;
         return Math.hypot(R.x - o.x, R.y - o.y) < o.rad + pad;
+      case 'mine':
+        // 터지는 순간, 빨간 원 안에 있던 아이만 맞는다
+        return o.state === 'boom' && o.t < 0.1 && Math.hypot(R.x - o.x, R.y - o.y) < o.rad;
       case 'wall':
         if (R.x + pad < o.x || R.x - pad > o.x + o.w) return false;
         return Math.abs(R.y - o.gapY) > o.gapH / 2 - pad * 0.35;
@@ -1052,6 +1301,15 @@ class RaceGame {
         if (o.t > o.warn + o.fall + o.live * 0.6) return 0;
         return near(Math.abs(y - o.y), o.rad + this.r * 2.2);
       }
+      case 'mine': {
+        // 드러난 지뢰만 보인다. 터질 때 내가 어디쯤 있을지를 따져 원 밖으로 비킨다
+        if (o.state !== 'armed') return 0;
+        const dxAt = (t - (o.fuse - o.t)) * 280;            // 터지는 순간 지뢰와의 가로 거리(대략)
+        const reach = o.rad + this.r * 1.5;
+        if (Math.abs(dxAt) >= reach) return 0;
+        const half = Math.sqrt(reach * reach - dxAt * dxAt);
+        return clamp(1.7 * (1 - Math.abs(y - o.y) / half), 0, 1);
+      }
       case 'wall': {
         const fy = o.gapY + o.vy * t;
         const edge = Math.abs(y - fy) - (o.gapH / 2 - this.r * 1.3);
@@ -1070,7 +1328,9 @@ class RaceGame {
       return clamp(R.y + rnd(-1, 1) * this.trackH * 0.07, this.top + this.r, this.bot - this.r);
     }
 
-    const N = 13;
+    const N = 15;
+    const personal = this.r * 2.1;
+    const crowd = this.runners.filter((O) => O !== R && O.alive && !O.heldBy && !O.flight && Math.abs(O.x - R.x) < this.r * 3.4);
     let bestY = R.y, best = Infinity;
     for (let i = 0; i < N; i++) {
       const y = this.top + this.r + (this.trackH - this.r * 2) * (i / (N - 1));
@@ -1080,6 +1340,10 @@ class RaceGame {
         const w = 1 / (1 + t * 1.5);                 // 가까운 장애물이 더 중요
         // 뛰어넘을 수 있는 건 조금 덜 무서워한다 -> 점프로 돌파하는 그림이 나온다
         cost += this.danger(o, y, t) * w * 3 * (LOW.has(o.kind) ? 0.7 : 1);
+      }
+      for (const O of crowd) {                         // 남들이 몰린 줄은 꺼린다 -> 한 방에 여럿이 쓸려 나가지 않는다
+        const d = Math.abs(y - O.targetY);
+        if (d < personal) cost += 0.42 * (1 - d / personal);
       }
       cost += Math.abs(y - R.y) / this.trackH * 0.55;  // 멀리 움직이기 싫어함
       cost += (1 - R.skill) * Math.random() * 1.5;     // 실력 없으면 헷갈림
@@ -1092,7 +1356,7 @@ class RaceGame {
   threat(R) {
     for (const o of this.obstacles) {
       const dx = o.x - R.x;
-      if (dx < -30 || dx > 230) continue;
+      if (dx < -30 || dx > 230 || o.kind === 'mine') continue;
       if (this.danger(o, R.y, Math.max(0, dx / 280)) > 0.40) return o.kind;
     }
     return null;
@@ -1708,6 +1972,7 @@ class RaceGame {
     const sx = o.x - this.camX;
     if (sx < -350 || sx > this.W + 350) return;
 
+    if (o.cool > 0) c.globalAlpha = 0.45 + 0.3 * Math.sin(this.time * 40);
     switch (o.kind) {
       case 'spinner': {
         c.save();
@@ -1816,6 +2081,68 @@ class RaceGame {
         }
         break;
       }
+      case 'mine': {
+        if (o.state === 'hidden') break;                 // 드러나기 전에는 바닥과 구분되지 않는다
+        const r = this.r;
+        if (o.state === 'armed') {
+          const k = clamp(o.t / o.fuse, 0, 1);
+          const pop = Math.min(1, o.t / 0.12);           // 툭 튀어나온다
+          const blink = Math.sin(o.t * o.t * 34 + o.t * 10) > 0;   // 갈수록 빨리 깜빡인다
+          // 폭파 범위: 빨간 원
+          c.save();
+          c.fillStyle = `rgba(255,40,48,${(0.12 + 0.2 * k) * (blink ? 1.35 : 1)})`;
+          c.beginPath(); c.arc(sx, o.y, o.rad * pop, 0, Math.PI * 2); c.fill();
+          c.strokeStyle = `rgba(255,${blink ? 120 : 60},${blink ? 110 : 70},${0.75 + 0.25 * k})`;
+          c.lineWidth = 3 + 2 * k;
+          c.setLineDash([12, 7]); c.lineDashOffset = -this.time * 60;
+          c.beginPath(); c.arc(sx, o.y, o.rad * pop, 0, Math.PI * 2); c.stroke();
+          c.setLineDash([]);
+          // 안쪽으로 조여드는 원 = 남은 시간
+          c.strokeStyle = 'rgba(255,225,200,.9)';
+          c.lineWidth = 2.5;
+          c.beginPath(); c.arc(sx, o.y, Math.max(r * 0.55, o.rad * (1 - k)), 0, Math.PI * 2); c.stroke();
+          c.restore();
+          // 지뢰 몸통
+          const mr = r * 0.62 * pop;
+          c.fillStyle = 'rgba(0,0,0,.4)';
+          c.beginPath(); c.ellipse(sx, o.y + mr * 0.5, mr * 1.15, mr * 0.5, 0, 0, Math.PI * 2); c.fill();
+          c.strokeStyle = '#11141f'; c.lineWidth = mr * 0.34; c.lineCap = 'round';
+          c.beginPath();
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2 + 0.39;
+            c.moveTo(sx + Math.cos(a) * mr * 0.8, o.y + Math.sin(a) * mr * 0.8);
+            c.lineTo(sx + Math.cos(a) * mr * 1.3, o.y + Math.sin(a) * mr * 1.3);
+          }
+          c.stroke();
+          const g = c.createRadialGradient(sx - mr * 0.3, o.y - mr * 0.35, 1, sx, o.y, mr);
+          g.addColorStop(0, '#5d6480'); g.addColorStop(1, '#1b1f30');
+          c.fillStyle = g;
+          c.beginPath(); c.arc(sx, o.y, mr, 0, Math.PI * 2); c.fill();
+          c.fillStyle = blink ? '#ff3040' : '#6a0f18';
+          if (blink) { c.shadowColor = '#ff2a3a'; c.shadowBlur = 16; }
+          c.beginPath(); c.arc(sx, o.y, mr * 0.42, 0, Math.PI * 2); c.fill();
+          c.shadowBlur = 0;
+        } else {
+          // 그을린 자국은 남고, 불덩이는 금세 사라진다
+          const fade = clamp(1 - (o.t - 0.5) / 2.5, 0, 1);
+          c.fillStyle = `rgba(8,6,10,${0.42 * fade})`;
+          c.beginPath(); c.arc(sx, o.y, o.rad * 0.72, 0, Math.PI * 2); c.fill();
+          c.fillStyle = `rgba(8,6,10,${0.3 * fade})`;
+          c.beginPath(); c.arc(sx, o.y, o.rad * 0.4, 0, Math.PI * 2); c.fill();
+          if (o.t < 0.42) {
+            const k = o.t / 0.42, e = 1 - (1 - k) * (1 - k);
+            const fr = o.rad * (0.45 + 0.7 * e);
+            const g = c.createRadialGradient(sx, o.y, 0, sx, o.y, fr);
+            g.addColorStop(0, `rgba(255,255,235,${1 - k})`);
+            g.addColorStop(0.35, `rgba(255,214,90,${0.95 * (1 - k)})`);
+            g.addColorStop(0.75, `rgba(255,96,40,${0.8 * (1 - k)})`);
+            g.addColorStop(1, 'rgba(255,60,30,0)');
+            c.fillStyle = g;
+            c.beginPath(); c.arc(sx, o.y, fr, 0, Math.PI * 2); c.fill();
+          }
+        }
+        break;
+      }
       case 'wall': {
         c.fillStyle = '#4b5fa8';
         const gTop = o.gapY - o.gapH / 2, gBot = o.gapY + o.gapH / 2;
@@ -1827,34 +2154,239 @@ class RaceGame {
         break;
       }
     }
+    c.globalAlpha = 1;
+  }
+
+  /**
+   * 팔다리 자세 (몸 중심 기준, 단위는 반지름).
+   * 춤출 때는 발이 땅에 붙어 있도록, 선 자리 기준으로 적힌 춤 자세를 몸 기준으로 옮긴다.
+   */
+  limbsOf(R, cel, st) {
+    const q = this._limb || (this._limb = { fl: [0, 0, 0], fr: [0, 0, 0], al: [0, 0], ar: [0, 0], el: [0, 0], er: [0, 0] });
+    q.kn = 0; q.hip = 0.3; q.sh = SHO_X; q.hl = ''; q.hr = ''; q.skipR = false;
+    q.el[0] = -1; q.el[1] = 0.35; q.er[0] = 1; q.er[1] = 0.35;
+
+    if (cel) {
+      const airK = clamp(cel.h / 0.5, 0, 1);                              // 공중에서는 발이 몸을 따라온다
+      const gy = GROUND - cel.by - st.sqz * 0.3 - Math.min(0.3, cel.h * 0.25);
+      const a = -cel.rot * (1 - airK), ca = Math.cos(a), sa = Math.sin(a);
+      for (const sd of [-1, 1]) {
+        const src = sd < 0 ? cel.fl : cel.fr, dst = sd < 0 ? q.fl : q.fr;
+        const x = src[0] - cel.bx, y = gy - src[1];
+        dst[0] = x * ca - y * sa; dst[1] = x * sa + y * ca; dst[2] = src[2];
+      }
+      q.al[0] = cel.al[0]; q.al[1] = cel.al[1]; q.ar[0] = cel.ar[0]; q.ar[1] = cel.ar[1];
+      q.el[0] = cel.el[0]; q.el[1] = cel.el[1]; q.er[0] = cel.er[0]; q.er[1] = cel.er[1];
+      q.kn = cel.kn; q.hip = cel.hip; q.sh = cel.sh; q.hl = cel.hl; q.hr = cel.hr;
+      return q;
+    }
+
+    const t = this.time, ph = R.bob;
+    const set = (v, x, y) => { v[0] = x; v[1] = y; v[2] = 0; };
+    if (st.strug) {                                                       // 들려서 버둥버둥
+      const k = Math.sin(t * 30), a = t * 26;
+      set(q.fl, -0.28 + 0.7 * k, 1.45); set(q.fr, 0.28 - 0.7 * k, 1.45);
+      set(q.al, -1.1 - Math.cos(a + 2.2) * 0.8, 0.1 + Math.sin(a + 2.2) * 0.8);
+      set(q.ar, 1.1 + Math.cos(a) * 0.8, 0.1 + Math.sin(a) * 0.8);
+    } else if (R.carry) {                                                 // 머리 위로 번쩍 든다 (던지기 직전엔 뒤로 젖힌다)
+      const up = clamp(R.liftT / 0.4, 0, 1), wk = this.windup(R);
+      set(q.fl, -0.34 + 0.2 * Math.sin(ph), GROUND); set(q.fr, 0.34 - 0.2 * Math.sin(ph), GROUND);
+      set(q.al, -(1.1 - 0.3 * up) - 0.6 * wk, -(0.1 + 1.2 * up)); set(q.ar, 1.1 - 0.3 * up - 0.6 * wk, -(0.1 + 1.2 * up));
+      q.el[1] = -0.2; q.er[1] = -0.2;
+    } else if (st.dz) {                                                   // 기절: 팔을 늘어뜨리고 휘청
+      const w = Math.sin(t * 7 + ph);
+      set(q.fl, -0.36 + 0.14 * w, GROUND); set(q.fr, 0.36 + 0.14 * w, GROUND);
+      set(q.al, -1.1 + 0.14 * w, 0.9); set(q.ar, 1.1 + 0.14 * w, 0.9);
+    } else if (st.air > 0.25) {                                           // 점프: 다리를 접고 두 팔을 번쩍
+      set(q.fl, -0.34, 1.15); set(q.fr, 0.34, 1.15);
+      set(q.al, -1.15, -1.0 - 0.2 * st.air); set(q.ar, 1.15, -1.0 - 0.2 * st.air);
+      q.el[1] = -0.2; q.er[1] = -0.2;
+    } else {                                                              // 달리기: 팔과 다리를 엇갈려 젓는다
+      const s = Math.sin(ph), cs = Math.cos(ph);
+      q.kn = 1; q.hip = 0.2;
+      set(q.fl, -0.12 + 0.6 * s, GROUND - 0.45 * Math.max(0, cs));
+      set(q.fr, 0.12 - 0.6 * s, GROUND - 0.45 * Math.max(0, -cs));
+      if (st.scared) {                                                    // 괴물이 코앞: 두 팔을 들고 허둥지둥
+        set(q.al, -1.15 + 0.2 * Math.sin(t * 28), -0.95 + 0.16 * Math.cos(t * 28));
+        set(q.ar, 1.15 + 0.2 * Math.sin(t * 28 + 2), -0.95 + 0.16 * Math.cos(t * 28 + 2));
+        q.el[1] = -0.2; q.er[1] = -0.2;
+      } else if (R.dash > 0) {                                            // 대쉬: 두 팔을 뒤로 쭉
+        set(q.al, -1.95, 0.4 + 0.06 * s); set(q.ar, 0.55, 0.98 + 0.04 * s);
+        q.er[0] = 0.2; q.er[1] = 1;
+      } else {
+        set(q.al, -1.08 - 0.34 * s, 0.7 - 0.14 * Math.abs(s));
+        set(q.ar, 1.08 + 0.34 * s, 0.7 - 0.14 * Math.abs(s));
+      }
+    }
+    if (R.punch > 0) q.skipR = true;                                      // 주먹 쥔 팔은 따로 그린다
+    return q;
+  }
+
+  /** 다리와 신발 (몸보다 먼저 그려서 허벅지 위쪽은 몸에 가린다) */
+  drawLegs(c, R, q, sx, y, r, moon) {
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    for (const sd of [-1, 1]) {
+      const f = sd < 0 ? q.fl : q.fr, tip = f[2] || 0;
+      const side = q.kn > 0.5;                                            // 옆모습인가
+      const hx = sd * q.hip;
+      const ax = f[0] - (side ? tip * 0.12 : 0), ay = f[1] - 0.14 - tip * 0.24;   // 발목 (뒤꿈치를 들면 올라간다)
+      const [kx, ky] = bend2(hx, HIP_Y, ax, ay, LEG, LEG, lerp(sd, 1, q.kn), -0.1);
+      c.beginPath();
+      c.moveTo(sx + hx * r, y + HIP_Y * r); c.lineTo(sx + kx * r, y + ky * r); c.lineTo(sx + ax * r, y + ay * r);
+      c.strokeStyle = INK; c.lineWidth = r * 0.3 + 3; c.stroke();
+      c.strokeStyle = `hsl(${R.hue},60%,36%)`; c.lineWidth = r * 0.3; c.stroke();
+      if (moon) {                                                         // 반짝이는 흰 양말
+        const dx = kx - ax, dy = ky - ay, d = Math.hypot(dx, dy) || 1;
+        c.strokeStyle = '#fff'; c.lineWidth = r * 0.3; c.lineCap = 'butt';
+        c.beginPath();
+        c.moveTo(sx + ax * r, y + ay * r); c.lineTo(sx + (ax + (dx / d) * 0.26) * r, y + (ay + (dy / d) * 0.26) * r);
+        c.stroke();
+        c.lineCap = 'round';
+      }
+      const fwd = side ? 0.13 : sd * 0.07;
+      c.fillStyle = moon ? '#0c0d12' : `hsl(${R.hue},65%,24%)`;
+      c.beginPath();
+      c.ellipse(sx + (ax + fwd) * r, y + (ay + 0.05 + tip * 0.07) * r, r * (side ? 0.3 : 0.24), r * 0.15,
+        tip * (side ? 0.85 : sd * 0.5), 0, Math.PI * 2);
+      c.fill();
+      c.strokeStyle = moon ? 'rgba(255,255,255,.75)' : INK; c.lineWidth = 1.5; c.stroke();
+      c.fillStyle = 'rgba(255,255,255,.3)';                                // 신발 코
+      c.beginPath();
+      c.arc(sx + (ax + fwd * 1.9) * r, y + (ay + 0.04 + tip * 0.14) * r, r * 0.055, 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+
+  /** 팔과 손 (몸 앞에 그린다) */
+  drawArms(c, R, q, sx, y, r) {
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    for (const sd of [-1, 1]) {
+      if (sd > 0 && q.skipR) continue;
+      const t = sd < 0 ? q.al : q.ar, hint = sd < 0 ? q.el : q.er, shape = sd < 0 ? q.hl : q.hr;
+      const shx = sd * q.sh;
+      const [ex, ey] = bend2(shx, SHO_Y, t[0], t[1], ARM, ARM, hint[0], hint[1]);
+      c.beginPath();
+      c.moveTo(sx + shx * r, y + SHO_Y * r); c.lineTo(sx + ex * r, y + ey * r); c.lineTo(sx + t[0] * r, y + t[1] * r);
+      c.strokeStyle = INK; c.lineWidth = r * 0.3 + 3; c.stroke();
+      c.strokeStyle = `hsl(${R.hue},68%,38%)`; c.lineWidth = r * 0.3; c.stroke();
+      const hx = sx + t[0] * r, hy = y + t[1] * r;
+      const skin = shape === 'glove' ? '#fff' : `hsl(${R.hue},95%,${shape ? 74 : 66}%)`;
+      if (shape === 'thumb' || shape === 'L' || shape === 'point') {      // 손가락
+        c.beginPath();
+        if (shape === 'point') {
+          const dx = t[0] - ex, dy = t[1] - ey, d = Math.hypot(dx, dy) || 1;
+          c.moveTo(hx, hy); c.lineTo(hx + (dx / d) * r * 0.55, hy + (dy / d) * r * 0.55);
+        } else {
+          c.moveTo(hx, hy); c.lineTo(hx, hy - r * (shape === 'L' ? 0.82 : 0.5));
+          if (shape === 'L') { c.moveTo(hx, hy); c.lineTo(hx - sd * r * 0.7, hy); }   // 엄지는 어느 손이든 몸 중심 쪽을 향한다
+        }
+        c.strokeStyle = INK; c.lineWidth = r * 0.2 + 3; c.stroke();
+        c.strokeStyle = skin; c.lineWidth = r * 0.2; c.stroke();
+      }
+      c.fillStyle = skin;
+      c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = INK; c.lineWidth = 1.6; c.stroke();
+    }
+  }
+
+  /** 모자·목도리 같은 꾸밈 (이름에서 정해진다). 춤 소품이 있으면 모자 자리는 소품이 차지한다 */
+  drawGear(c, R, sx, y, r, prop) {
+    const L = R.look;
+    const A = `hsl(${L.accHue},85%,60%)`, A2 = `hsl(${L.accHue},75%,40%)`;
+    const acc = prop === 'fedora' && (L.acc === 'cap' || L.acc === 'beanie' || L.acc === 'bow' || L.acc === 'headband') ? 'none' : L.acc;
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    switch (acc) {
+      case 'cap':
+        c.fillStyle = A2;                                                 // 챙
+        c.beginPath(); c.ellipse(sx + r * 0.66, y - r * 0.6, r * 0.5, r * 0.13, 0.1, 0, Math.PI * 2); c.fill();
+        c.fillStyle = A;
+        c.beginPath(); c.ellipse(sx, y - r * 0.6, r * 0.8, r * 0.52, 0, Math.PI, 0); c.closePath(); c.fill();
+        c.fillStyle = A2;
+        c.beginPath(); c.arc(sx, y - r * 1.12, r * 0.08, 0, Math.PI * 2); c.fill();
+        break;
+      case 'beanie':
+        c.fillStyle = A;
+        c.beginPath(); c.ellipse(sx, y - r * 0.62, r * 0.78, r * 0.6, 0, Math.PI, 0); c.closePath(); c.fill();
+        c.strokeStyle = A2; c.lineWidth = r * 0.2;
+        c.beginPath(); c.moveTo(sx - r * 0.74, y - r * 0.62); c.lineTo(sx + r * 0.74, y - r * 0.62); c.stroke();
+        c.fillStyle = '#fff';
+        c.beginPath(); c.arc(sx, y - r * 1.26, r * 0.19, 0, Math.PI * 2); c.fill();
+        break;
+      case 'headband': {
+        const fl = Math.sin(R.bob * 1.7) * r * 0.12;
+        c.strokeStyle = A; c.lineWidth = r * 0.17;
+        c.beginPath(); c.moveTo(sx - r * 0.84, y - r * 0.5); c.quadraticCurveTo(sx, y - r * 0.68, sx + r * 0.84, y - r * 0.5); c.stroke();
+        c.lineWidth = r * 0.12;                                           // 뒤로 날리는 매듭
+        c.beginPath();
+        c.moveTo(sx - r * 0.86, y - r * 0.5); c.lineTo(sx - r * 1.3, y - r * 0.62 + fl);
+        c.moveTo(sx - r * 0.86, y - r * 0.5); c.lineTo(sx - r * 1.25, y - r * 0.34 - fl);
+        c.stroke();
+        break;
+      }
+      case 'bow':
+        c.fillStyle = A;
+        for (const s of [-1, 1]) {
+          c.beginPath();
+          c.moveTo(sx - r * 0.42, y - r * 0.9);
+          c.lineTo(sx - r * 0.42 + s * r * 0.44, y - r * 1.16);
+          c.lineTo(sx - r * 0.42 + s * r * 0.44, y - r * 0.68);
+          c.closePath(); c.fill();
+        }
+        c.fillStyle = A2;
+        c.beginPath(); c.arc(sx - r * 0.42, y - r * 0.9, r * 0.12, 0, Math.PI * 2); c.fill();
+        break;
+      case 'scarf': {
+        const fl = Math.sin(R.bob * 1.7) * r * 0.16;
+        c.strokeStyle = A2; c.lineWidth = r * 0.2;                        // 뒤로 날리는 자락
+        c.beginPath(); c.moveTo(sx - r * 0.7, y + r * 0.56); c.quadraticCurveTo(sx - r * 1.1, y + r * 0.5 - fl, sx - r * 1.45, y + r * 0.62 + fl); c.stroke();
+        c.strokeStyle = A; c.lineWidth = r * 0.24;
+        c.beginPath(); c.moveTo(sx - r * 0.8, y + r * 0.5); c.quadraticCurveTo(sx, y + r * 0.86, sx + r * 0.8, y + r * 0.5); c.stroke();
+        break;
+      }
+    }
+    if (prop === 'fedora') {                                              // 문워크의 중절모 (살짝 눌러쓴다)
+      c.save();
+      c.translate(sx + r * 0.12, y - r * 0.72); c.rotate(0.12);
+      c.fillStyle = '#0d0e14';
+      c.beginPath(); c.ellipse(0, 0, r * 1.12, r * 0.2, 0, 0, Math.PI * 2); c.fill();
+      c.beginPath();
+      c.moveTo(-r * 0.66, 0); c.lineTo(-r * 0.56, -r * 0.6); c.quadraticCurveTo(0, -r * 0.78, r * 0.56, -r * 0.6); c.lineTo(r * 0.66, 0);
+      c.closePath(); c.fill();
+      c.strokeStyle = '#f4f4f8'; c.lineWidth = r * 0.14; c.lineCap = 'butt';
+      c.beginPath(); c.moveTo(-r * 0.63, -r * 0.14); c.lineTo(r * 0.63, -r * 0.14); c.stroke();
+      c.restore();
+    }
   }
 
   drawRunner(c, R, ghost) {
     let sx = R.x - this.camX;
     if (sx < -90 || sx > this.W + 90) return;
-    const r = this.r;
+    const r0 = this.r;                                           // 부딪히는 반지름
+    const r = ghost ? r0 : r0 * BODY;                            // 그리는 몸통 반지름 (얼굴·팔다리는 모두 이 크기 기준)
     const hurt = !ghost && R.hurt > 0 ? clamp(R.hurt / 0.55, 0, 1) : 0;   // 맞은 직후 1 -> 0
     if (hurt) sx += Math.sin(this.time * 70) * r * 0.14 * hurt;             // 부르르 떤다
     if (!ghost && R.heldBy) sx += Math.sin(this.time * 45) * r * 0.1;       // 버둥버둥
     const cel = !ghost && R.cel ? R.cel : null;                  // 세레모니 자세
-    if (cel) sx += cel.dx * r;
+    const footX = sx + (cel ? cel.dx * r0 : 0);                  // 발 딛고 선 자리
+    if (cel) sx = footX + cel.bx * cel.flipX * r;
     const h = ghost ? 0 : this.heightOf(R);                      // 떠 있는 높이(px)
     const S = ghost ? 1 : this.scaleOf(R);                       // 뜨면 커진다
     const carried = !ghost && !!(R.heldBy || R.flight);          // 들려 있거나 던져진 중
-    const air = ghost || carried ? 0 : clamp(h / (r * 3.3), 0, 1); // 점프 느낌(길쭉, 빛남)
-    const hs = clamp(h / (r * 3.3), 0, 1);                       // 그림자가 줄어드는 정도
+    const air = ghost || carried ? 0 : clamp(h / (r0 * 3.3), 0, 1); // 점프 느낌(길쭉, 빛남)
+    const hs = clamp(h / (r0 * 3.3), 0, 1);                      // 그림자가 줄어드는 정도
     const dz = !ghost && R.dizzy > 0;
     const scared = !ghost && !R.heldBy && R.fear > 0.45 && R.dizzy <= 0;   // 괴물이 코앞이라 겁먹음
     const strug = !ghost && !!R.heldBy;                          // 들려서 버둥거리는 중
     const sqz = !ghost ? Math.max(clamp(R.squash / 0.35, 0, 1), R.carry ? 0.5 : 0, cel ? cel.sq : 0) : 0;   // 밟혀/무거워 납작
-    const hop = ghost || carried ? 0 : cel ? cel.hop * r : Math.abs(Math.sin(R.bob)) * r * 0.42;
-    const y = R.y - hop - h + sqz * r * 0.3;
+    const hop = ghost || carried || cel ? 0 : Math.abs(Math.sin(R.bob)) * r0 * 0.36;
+    // 몸통은 땅에서 띄워 다리가 보이게 한다. 춤출 때는 발은 그대로 두고 몸만 오르내린다
+    const y = R.y - hop - h + sqz * r * 0.3 + (ghost ? 0 : (cel ? cel.by : 0) * r - LIFT * r0);
 
     // 그림자 (뜰수록 작아진다)
     if (!ghost && !R.heldBy) {
       c.fillStyle = `rgba(0,0,0,${0.34 - hs * 0.2})`;
       c.beginPath();
-      c.ellipse(sx, R.y + r * 0.82, r * (0.85 - hs * 0.35), r * (0.3 - hs * 0.12), 0, 0, Math.PI * 2);
+      c.ellipse(footX, R.y + r0 * 0.9, r0 * (0.85 - hs * 0.35), r0 * (0.28 - hs * 0.12), 0, 0, Math.PI * 2);
       c.fill();
     }
 
@@ -1888,22 +2420,13 @@ class RaceGame {
       c.restore();
     }
 
-    // 다리 (공중에서는 접는다)
-    if (!ghost && air < 0.25) {
-      c.strokeStyle = `hsl(${R.hue},55%,38%)`;
-      c.lineWidth = r * 0.34; c.lineCap = 'round';
-      const sw = strug ? Math.sin(this.time * 30) * r * 0.9
-        : cel && cel.legSw !== undefined ? cel.legSw * r
-        : cel && cel.legAmp !== undefined ? Math.sin(cel.legPh) * r * cel.legAmp
-        : Math.sin(R.bob) * r * 0.55;
-      c.beginPath();
-      c.moveTo(sx - r * 0.28, y + r * 0.55); c.lineTo(sx - r * 0.28 + sw, y + r * 1.05);
-      c.moveTo(sx + r * 0.28, y + r * 0.55); c.lineTo(sx + r * 0.28 - sw, y + r * 1.05);
-      c.stroke();
-    }
-
     const L = R.look;
     const dark = `hsl(${R.hue},70%,42%)`;
+    const prop = cel ? cel.prop : '';
+    const limb = ghost ? null : this.limbsOf(R, cel, { air, dz, scared, strug, sqz });
+
+    // 다리
+    if (limb) this.drawLegs(c, R, limb, sx, y, r, prop === 'fedora');
 
     // 꼬리 (엉덩이에서 뒤로 뻗어 끝이 살짝 들리고, 물결치듯 살랑거린다)
     if (L.tail) {
@@ -2001,6 +2524,25 @@ class RaceGame {
     c.strokeStyle = air > 0.15 ? `rgba(255,255,255,${0.35 + air * 0.55})` : 'rgba(0,0,0,.28)';
     c.lineWidth = air > 0.15 ? 2.4 : 1.6;
     c.stroke();
+
+    // 배 (밝은 색 배)
+    if (L.belly) {
+      c.fillStyle = `hsla(${R.hue},100%,90%,.42)`;
+      c.beginPath(); c.ellipse(sx + r * 0.05, y + ry * 0.42, rx * 0.5, ry * 0.4, 0, 0, Math.PI * 2); c.fill();
+    }
+    // 줄무늬 옷 (몸 모양 안쪽으로만 칠한다)
+    if (L.stripes) {
+      c.save();
+      c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.clip();
+      c.strokeStyle = `hsla(${R.hue},70%,30%,.42)`;
+      c.lineWidth = r * 0.17; c.lineCap = 'butt';
+      c.beginPath();
+      for (const k of [0.36, 0.7]) {
+        c.moveTo(sx - r * 1.1, y + ry * k); c.quadraticCurveTo(sx, y + ry * (k + 0.16), sx + r * 1.1, y + ry * k);
+      }
+      c.stroke();
+      c.restore();
+    }
     if (hurt > 0) {                                  // 하얗게 번쩍
       c.fillStyle = `rgba(255,255,255,${Math.min(hurt * 1.2, 1) * 0.75})`;
       c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.fill();
@@ -2014,6 +2556,18 @@ class RaceGame {
       c.beginPath(); c.arc(sx + r * 0.52, y - r * 0.44, r * 0.12, 0, Math.PI * 2); c.fill();
     }
 
+    /* 얼굴: 달릴 때는 가는 쪽으로, 춤출 때는 보는 쪽으로 살짝 돌린다 */
+    c.save();
+    c.translate((cel ? cel.look * 0.3 : ghost ? 0 : 0.1) * r, 0);
+
+    // 볼 터치
+    if (L.blush) {
+      c.fillStyle = 'rgba(255,110,140,.36)';
+      for (const s of [-1, 1]) {
+        c.beginPath(); c.ellipse(sx + s * r * 0.5, y + r * 0.14, r * 0.15, r * 0.09, 0, 0, Math.PI * 2); c.fill();
+      }
+    }
+
     // 눈 (뛸 때는 질끈 감는다. 윙크하는 아이도 있다)
     const shutLine = (x0, x1) => {
       c.beginPath(); c.moveTo(x0, y - r * 0.18); c.lineTo(x1, y - r * 0.18); c.stroke();
@@ -2022,7 +2576,25 @@ class RaceGame {
     c.strokeStyle = '#16203c';
     c.lineWidth = Math.max(1.5, r * 0.13);
     c.lineCap = 'round';
-    if (cel) {                                       // 신나서 ^ ^
+    if (prop === 'shades') {                         // 말춤의 선글라스
+      c.fillStyle = '#0b0d16';
+      for (const s of [-1, 1]) {
+        c.beginPath(); c.ellipse(sx + s * r * 0.3, y - r * 0.14, r * 0.27, r * 0.2, 0, 0, Math.PI * 2); c.fill();
+      }
+      c.lineWidth = Math.max(1.5, r * 0.1); c.strokeStyle = '#0b0d16';
+      c.beginPath(); c.moveTo(sx - r * 0.1, y - r * 0.18); c.lineTo(sx + r * 0.1, y - r * 0.18);
+      c.moveTo(sx - r * 0.55, y - r * 0.2); c.lineTo(sx - r * 0.86, y - r * 0.3);
+      c.moveTo(sx + r * 0.55, y - r * 0.2); c.lineTo(sx + r * 0.86, y - r * 0.3);
+      c.stroke();
+      c.strokeStyle = 'rgba(255,255,255,.55)'; c.lineWidth = Math.max(1, r * 0.06);
+      for (const s of [-1, 1]) {
+        c.beginPath(); c.moveTo(sx + s * r * 0.3 - r * 0.14, y - r * 0.12); c.lineTo(sx + s * r * 0.3 - r * 0.02, y - r * 0.24); c.stroke();
+      }
+    } else if (cel && cel.face === 'smug') {         // 약 올리는 눈: 한쪽은 윙크
+      c.lineWidth = Math.max(2, r * 0.15);
+      c.beginPath(); c.arc(sx + r * 0.27, y - r * 0.08, r * 0.17, Math.PI * 1.08, Math.PI * 1.92); c.stroke();
+      c.beginPath(); c.moveTo(sx - r * 0.42, y - r * 0.24); c.lineTo(sx - r * 0.2, y - r * 0.14); c.lineTo(sx - r * 0.42, y - r * 0.04); c.stroke();
+    } else if (cel) {                                // 신나서 ^ ^
       c.lineWidth = Math.max(2, r * 0.15);
       for (const ex of [sx + r * 0.27, sx - r * 0.27]) {
         c.beginPath(); c.arc(ex, y - r * 0.08, r * 0.17, Math.PI * 1.08, Math.PI * 1.92); c.stroke();
@@ -2051,13 +2623,38 @@ class RaceGame {
       shutLine(sx + r * 0.08, sx + r * 0.36);
       shutLine(sx - r * 0.38, sx - r * 0.1);
     } else {
-      c.beginPath(); c.arc(sx + r * 0.22, y - r * 0.16, r * 0.15, 0, Math.PI * 2); c.fill();
+      // 눈 모양은 아이마다 다르다: 점 / 큰 눈 / 길쭉한 눈. 눈동자에 반짝이는 점 하나
+      const ew = r * (L.eyes === 'big' ? 0.2 : L.eyes === 'oval' ? 0.12 : 0.15);
+      const eh = r * (L.eyes === 'big' ? 0.2 : L.eyes === 'oval' ? 0.2 : 0.15);
+      const eye = (ex) => {
+        c.fillStyle = '#16203c';
+        c.beginPath(); c.ellipse(ex, y - r * 0.16, ew, eh, 0, 0, Math.PI * 2); c.fill();
+        c.fillStyle = 'rgba(255,255,255,.9)';
+        c.beginPath(); c.arc(ex + ew * 0.3, y - r * 0.16 - eh * 0.35, Math.max(1, ew * 0.34), 0, Math.PI * 2); c.fill();
+      };
+      eye(sx + r * 0.22);
       if (L.wink) shutLine(sx - r * 0.38, sx - r * 0.1);
-      else { c.beginPath(); c.arc(sx - r * 0.24, y - r * 0.16, r * 0.15, 0, Math.PI * 2); c.fill(); }
+      else eye(sx - r * 0.24);
+      c.fillStyle = '#16203c';
+    }
+
+    // 안경
+    if (L.acc === 'glasses' && prop !== 'shades') {
+      c.strokeStyle = '#141a33'; c.lineWidth = Math.max(1.2, r * 0.07);
+      for (const s of [-1, 1]) {
+        c.beginPath(); c.arc(sx + s * r * 0.26, y - r * 0.15, r * 0.25, 0, Math.PI * 2); c.stroke();
+      }
+      c.beginPath(); c.moveTo(sx - r * 0.02, y - r * 0.15); c.lineTo(sx + r * 0.02, y - r * 0.15); c.stroke();
+      c.strokeStyle = '#16203c';
     }
 
     // 입
-    if (cel) {                                       // 활짝 웃는 입
+    if (cel && cel.face === 'smug') {                // 메롱
+      c.lineWidth = Math.max(1.5, r * 0.12);
+      c.beginPath(); c.arc(sx, y + r * 0.12, r * 0.3, 0.1 * Math.PI, 0.9 * Math.PI); c.stroke();
+      c.fillStyle = '#ff6f86';
+      c.beginPath(); c.ellipse(sx + r * 0.08, y + r * 0.5, r * 0.15, r * 0.2, 0, 0, Math.PI * 2); c.fill();
+    } else if (cel) {                                // 활짝 웃는 입
       c.fillStyle = '#16203c';
       c.beginPath(); c.arc(sx, y + r * 0.12, r * 0.34, 0, Math.PI); c.closePath(); c.fill();
       c.fillStyle = '#ff7a8a';
@@ -2071,6 +2668,10 @@ class RaceGame {
       c.ellipse(sx, y + r * 0.3, r * 0.18, r * (air > 0.3 ? 0.3 : 0.2), 0, 0, Math.PI * 2);
       c.fill();
     }
+    c.restore();
+
+    // 모자·목도리, 춤 소품
+    if (!ghost) this.drawGear(c, R, sx, y, r, prop);
 
     // 맞거나 기절하면 머리 위로 별이 빙글빙글
     const starK = Math.max(hurt > 0.1 ? Math.min(hurt * 2, 1) : 0, dz ? Math.min(R.dizzy / 0.35, 1) : 0);
@@ -2114,44 +2715,8 @@ class RaceGame {
       c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1.5; c.stroke();
     }
 
-    // 들려서 허공에 휘젓는 팔
-    if (strug) {
-      c.strokeStyle = dark;
-      c.lineWidth = r * 0.32; c.lineCap = 'round';
-      for (const sd of [-1, 1]) {
-        const a = this.time * 26 + (sd > 0 ? 0 : 2.2);
-        const hx = sx + sd * r * 0.8 + sd * Math.cos(a) * r * 0.85, hy = y + r * 0.1 + Math.sin(a) * r * 0.85;
-        c.beginPath(); c.moveTo(sx + sd * r * 0.75, y + r * 0.1); c.lineTo(hx, hy); c.stroke();
-        c.fillStyle = `hsl(${R.hue},95%,66%)`;
-        c.beginPath(); c.arc(hx, hy, r * 0.26, 0, Math.PI * 2); c.fill();
-      }
-    }
-
-    // 머리 위로 번쩍 든 두 팔 (던지기 직전엔 뒤로 젖힌다)
-    if (!ghost && R.carry) {
-      const up = clamp(R.liftT / 0.4, 0, 1), wk = this.windup(R);
-      c.strokeStyle = dark;
-      c.lineWidth = r * 0.36; c.lineCap = 'round';
-      for (const sd of [-1, 1]) {
-        const hx = sx + sd * r * (0.85 - 0.25 * up) - r * 0.6 * wk, hy = y - r * (0.2 + 1.1 * up);
-        c.beginPath(); c.moveTo(sx + sd * r * 0.7, y + r * 0.1); c.lineTo(hx, hy); c.stroke();
-        c.fillStyle = `hsl(${R.hue},95%,66%)`;
-        c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
-      }
-    }
-    // 세레모니 팔 (춤마다 모양이 다르다)
-    if (cel && cel.arms) {
-      c.strokeStyle = dark;
-      c.lineWidth = r * 0.36; c.lineCap = 'round'; c.lineJoin = 'round';
-      for (const sd of [-1, 1]) {
-        const [ex, ey, hx, hy] = celHands(cel, sd, r, sx, y);
-        c.beginPath(); c.moveTo(sx + sd * r * 0.75, y + r * 0.1);
-        if (ex !== null) c.lineTo(ex, ey);
-        c.lineTo(hx, hy); c.stroke();
-        c.fillStyle = `hsl(${R.hue},95%,66%)`;
-        c.beginPath(); c.arc(hx, hy, r * 0.3, 0, Math.PI * 2); c.fill();
-      }
-    }
+    // 팔과 손 (달리기, 점프, 버둥거림, 들어 올리기, 춤 모두 여기서 그린다)
+    if (limb) this.drawArms(c, R, limb, sx, y, r);
     c.restore();
   }
 
@@ -2170,7 +2735,7 @@ class RaceGame {
     const ordered = list.slice().sort((a, b) => a.seq - b.seq);
 
     for (const R of ordered) {
-      const sx = R.x - this.camX + (R.cel ? R.cel.dx * this.r : 0);
+      const sx = R.x - this.camX + (R.cel ? (R.cel.dx + R.cel.bx * R.cel.flipX) * this.r : 0);
       if (sx < -90 || sx > this.W + 90) continue;
       const r = this.r;
       const big = this.phase === 'done' && R === this.winner;
@@ -2180,7 +2745,7 @@ class RaceGame {
 
       // 점프는 완만한 곡선이라 따라가도 되지만, bob 은 너무 빨라 뺀다.
       // 아이를 들고 있으면 이름표는 머리 위 아이보다 더 위로
-      const headY = R.y - this.heightOf(R) - r * this.scaleOf(R) - (R.carry ? r * 2.1 * clamp(R.liftT / 0.4, 0, 1) : 0);
+      const headY = R.y - this.heightOf(R) - r * (this.scaleOf(R) * (BODY + LIFT) + (R.look.acc === 'cap' || R.look.acc === 'beanie' ? 0.15 : 0)) - (R.carry ? r * 2.1 * clamp(R.liftT / 0.4, 0, 1) : 0);
       const baseTy = headY - fs * 0.5;
 
       // 빈 칸 찾기. 위로만 쌓으면 탑이 되므로 옆으로 비키는 쪽을 먼저 본다.
@@ -2245,10 +2810,10 @@ class WinHero {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     const view = Object.create(RaceGame.prototype);       // 그리기 도구만 빌린다
-    view.r = S * 0.11; view.W = view.H = S; view.camX = 0; view.time = 0;
+    view.r = S * 0.115; view.W = view.H = S; view.camX = 0; view.time = 0;
     this.view = view;
     this.R = Object.assign({}, runner, {
-      x: S / 2, y: S * 0.8, cel: null,
+      x: S / 2, y: S * 0.84, cel: null,
       dash: 0, jump: 0, stomp: null, heldBy: null, flight: null, carry: null,
       punch: 0, hurt: 0, dizzy: 0, squash: 0, fear: 0, spin: 0,
     });
@@ -2259,7 +2824,7 @@ class WinHero {
     const tick = (now) => {
       if (!this.running) return;
       this.raf = requestAnimationFrame(tick);
-      const dt = Math.min((now - this.last) / 1000, 1 / 24);
+      const dt = clamp((now - this.last) / 1000, 0, 1 / 24);
       this.last = now;
       this.t += dt;
       view.time += dt;
