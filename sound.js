@@ -20,7 +20,7 @@ const Sound = {
   GAP: {
     jump: 70, land: 90, out: 70, punch: 180, boom: 140, countdown: 120,
     stomp: 160, lift: 160, throw: 160, thud: 160, growl: 700, gulp: 120, slurp: 200,
-    mine: 150, blast: 110, chomp: 200, heart: 300, revive: 300,
+    mine: 150, blast: 110, chomp: 200, heart: 300, revive: 300, holy: 1500,
   },
 
   /* ---------- 준비 ---------- */
@@ -58,6 +58,7 @@ const Sound = {
     this.init();
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
     this.preloadMusic();
+    this.preloadFx('holy', 'holy.mp3');
   },
 
   /* ---------- 배경음 (bgm.mp3, 75초) ---------- */
@@ -77,6 +78,30 @@ const Sound = {
       .then((buf) => { this._bgm = buf; })
       .catch(() => { /* 음원이 없거나 file:// 로 열었으면 조용히 건너뛴다 */ })
       .finally(() => { this._bgmLoading = false; });
+  },
+
+  /** 파일로 된 효과음을 미리 받아 풀어 둔다 (name -> 풀어 둔 소리) */
+  _fx: {},
+  _fxLoading: {},
+  preloadFx(name, url) {
+    if (!this.ctx || this._fx[name] || this._fxLoading[name]) return;
+    this._fxLoading[name] = true;
+    fetch(url)
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then((ab) => this.ctx.decodeAudioData(ab))
+      .then((buf) => { this._fx[name] = buf; })
+      .catch(() => { /* 파일이 없거나 file:// 로 열었으면 조용히 건너뛴다 */ })
+      .finally(() => { this._fxLoading[name] = false; });
+  },
+
+  /** 풀어 둔 효과음 하나를 낸다 */
+  playFx(name, gain = 1) {
+    const buf = this._fx[name];
+    if (!buf) return;
+    const c = this.ctx, s = c.createBufferSource(), g = c.createGain();
+    s.buffer = buf; g.gain.value = gain;
+    s.connect(g); g.connect(this.master);
+    s.start();
   },
 
   startMusic() {
@@ -259,6 +284,9 @@ const Sound = {
       [784, 988, 1175, 1568].forEach((f, i) => this.tone({ type: 'sine', f0: f, t: 0.35, gain: 0.28, at: i * 0.06 }));
       this.hiss({ t: 0.5, gain: 0.12, f0: 3000, f1: 8000, type: 'bandpass', q: 0.7 });
     },
+
+    /* 천사가 나타났다: 성스러운 주문 소리 (holy.mp3) */
+    holy() { this.playFx('holy', 0.8); },
 
     /* 천사가 아이를 내려놓았다: 맑은 화음 */
     revive() {

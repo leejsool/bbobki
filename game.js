@@ -1152,6 +1152,7 @@ class RaceGame {
     R.x = this.camX + A.sx * this.W;
     this.angels.push(A);
     this.sfx('heart');
+    this.sfx('holy');                                    // 천사가 나타나는 순간의 주문 소리
     if (this.opts.onHeart) this.opts.onHeart(by, R);
   }
 
