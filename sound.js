@@ -57,6 +57,59 @@ const Sound = {
   resume() {
     this.init();
     if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+    this.preloadMusic();
+  },
+
+  /* ---------- 배경음 (bgm.mp3, 75초) ---------- */
+  _bgm: null,        // 풀어 둔 소리
+  _bgmLoading: false,
+  _bgmSrc: null,
+  _bgmGain: null,
+  BGM_VOLUME: 0.4,   // 효과음이 묻히지 않게 낮춘다
+
+  /** 레이스가 시작되기 전에 미리 받아 풀어 둔다 (처음 나올 때 끊기지 않게) */
+  preloadMusic() {
+    if (!this.ctx || this._bgm || this._bgmLoading) return;
+    this._bgmLoading = true;
+    fetch('bgm.mp3')
+      .then((r) => { if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then((ab) => this.ctx.decodeAudioData(ab))
+      .then((buf) => { this._bgm = buf; })
+      .catch(() => { /* 음원이 없거나 file:// 로 열었으면 조용히 건너뛴다 */ })
+      .finally(() => { this._bgmLoading = false; });
+  },
+
+  startMusic() {
+    this.stopMusic();
+    if (!this.on || !this.ctx || !this._bgm || this.ctx.state !== 'running') return;
+    const c = this.ctx;
+    const src = c.createBufferSource();
+    src.buffer = this._bgm;
+    const g = c.createGain();
+    g.gain.value = this.BGM_VOLUME;
+    src.connect(g); g.connect(c.destination);
+    src.onended = () => { if (this._bgmSrc === src) this._bgmSrc = this._bgmGain = null; };
+    src.start();
+    this._bgmSrc = src;
+    this._bgmGain = g;
+  },
+
+  /** 서서히 줄이며 끝낸다 */
+  fadeMusic(sec = 2.5) {
+    const src = this._bgmSrc, g = this._bgmGain;
+    if (!src || !g) return;
+    const now = this.ctx.currentTime;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.linearRampToValueAtTime(0, now + sec);
+    try { src.stop(now + sec + 0.05); } catch (e) { /* 이미 끝남 */ }
+  },
+
+  /** 바로 끈다 */
+  stopMusic() {
+    const src = this._bgmSrc;
+    this._bgmSrc = this._bgmGain = null;
+    if (src) { try { src.stop(); } catch (e) { /* 이미 끝남 */ } }
   },
 
   load() {
@@ -70,7 +123,7 @@ const Sound = {
   setOn(v) {
     this.on = !!v;
     try { localStorage.setItem('bbobki.sound', this.on ? '1' : '0'); } catch (e) { /* 무시 */ }
-    if (this.on) this.resume();
+    if (this.on) this.resume(); else this.stopMusic();
   },
 
   /* ---------- 재료 ---------- */

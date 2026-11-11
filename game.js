@@ -1051,6 +1051,7 @@ class RaceGame {
       if (this.winner) this.order.unshift(this.winner);
       this.burst(this.winner ? this.winner.x : this.dist, this.winner ? this.winner.y : this.H / 2, 46, 50);
       if (this.opts.onStage) this.opts.onStage('생존!');
+      if (this.opts.onFinish) this.opts.onFinish();
     }
   }
 

@@ -235,6 +235,7 @@ function runGame(cls) {
       onCountdown(text) {
         if (text === null) { el.countdown.hidden = true; return; }
         Sound.play(text === '출발!' ? 'go' : 'countdown');
+        if (text === '출발!') Sound.startMusic();       // 3, 2, 1 이 끝나면 배경음 시작
         el.countdown.hidden = false;
         const span = el.countdown.firstElementChild;
         span.textContent = text;
@@ -288,6 +289,7 @@ function runGame(cls) {
         setTimeout(() => d.remove(), 3000);
         while (el.killFeed.children.length > 6) el.killFeed.firstChild.remove();
       },
+      onFinish() { Sound.fadeMusic(); },                // 마지막 한 명이 정해지면 서서히 끈다
       onWin(R, order) { showWin(R, order, cls); },
     });
   } else {
@@ -373,7 +375,7 @@ el.btnStart.onclick = startRace;
 el.sndPick.onclick = toggleSound;
 el.sndRace.onclick = toggleSound;
 el.btnSpeed.onclick = toggleSpeed;
-el.btnQuit.onclick = () => { game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
+el.btnQuit.onclick = () => { Sound.stopMusic(); game && game.stop(); el.countdown.hidden = true; clearToast(); show('pick'); };
 el.btnAgain.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); startRace(); };
 el.btnHome.onclick = () => { confettiStop(); hidePeek(); hero && hero.stop(); show('pick'); };
 
