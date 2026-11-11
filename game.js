@@ -592,6 +592,9 @@ class RaceGame {
     this.cd = 3.6;
     this.running = true;
     this.last = performance.now();
+    // 첫 프레임(3 이 뜨는 순간)이 먼저 그려진 뒤에 미리 해 둘 일을 한다
+    const run = this.runners;
+    setTimeout(() => { if (this.runners === run) this.prewarm(); }, 60);
     this.loop();
   }
 
@@ -604,6 +607,64 @@ class RaceGame {
   destroy() {
     this.stop();
     window.removeEventListener('resize', this._onResize);
+  }
+
+  /**
+   * 3·2·1 세는 동안 미리 해 두는 일. 나중에 처음 쓰일 때 생기는 순간 끊김을 없앤다.
+   *  - 웹폰트: 이름·구호 글자를 미리 받아 둔다 (한글 폰트는 쓰는 글자 조각만 따로 받는다)
+   *  - 빛 그림·이름표 폭: 쓸 색과 글자 폭을 미리 만들어 둔다
+   *  - 괴물·천사: 처음 나타날 때 코드가 처음 도는 느린 프레임을 화면 밖 캔버스에 한 번 그려 겪어 둔다
+   * 실패해도 게임에는 영향이 없어야 하므로 모두 try/catch 로 감싼다.
+   */
+  prewarm() {
+    const runners = this.runners;
+    if (!runners || !this.running) return;
+    try {
+      if (document.fonts && document.fonts.load) {
+        const names = runners.map((R) => R.name).join('');
+        document.fonts.load('700 16px "Gothic A1"', names + '0123456789').catch(() => {});
+        document.fonts.load('600 12px "Gothic A1"', '0123456789m').catch(() => {});
+        document.fonts.load('400 16px "Jua"', '꿀꺽쾅쿵!' + names).catch(() => {});
+      }
+      for (const R of runners) this.glowOf('halo', R.hue);
+      for (let h = 18; h <= 172; h += 3) this.glowOf('spot', h);
+      this.glowOf('halo', 45); this.glowOf('halo', 355);
+      const c0 = this.ctx, fs = Math.max(13, this.r * 0.8);
+      c0.save();
+      c0.font = `700 ${fs}px Gothic A1, sans-serif`;
+      for (const R of runners) { R._lfs = fs; R._lfont = c0.font; R._lw = c0.measureText(R.name).width; R._lgen = FONT_GEN; }
+      c0.restore();
+    } catch (e) { /* 미리 해 두기만 실패 */ }
+
+    // 화면 밖 캔버스에 괴물·천사를 한 번씩 그려 본다 (게임 상태는 건드리지 않고 되돌린다)
+    const savedMaw = this.maw, savedMawX = this.mawX;
+    try {
+      const cv = document.createElement('canvas');
+      cv.width = Math.max(2, Math.round(this.W / 2)); cv.height = Math.max(2, Math.round(this.H / 2));
+      const c = cv.getContext('2d');
+      c.setTransform(0.5, 0, 0, 0.5, 0, 0);
+      const base = this.maw, r = this.r, prey = runners[0];
+      const lane = this.top + this.trackH * 0.5;
+      const looks = [
+        { state: 'creep', f: 0.06, rage: 0 },
+        { state: 'creep', f: 0.06, rage: 0.85, full: 0.3 },
+        { state: 'warn', kind: 'strike', f: 0.06, rage: 0.2, t: 0.5, warnT: 1, lane, reach: r * 8, ext: 0 },
+        { state: 'strike', kind: 'strike', f: 0.06, rage: 0.2, t: 0.2, lane, reach: r * 8, ext: 0.8 },
+        { state: 'hunt', kind: 'hunt', f: 0.06, rage: 1, prey, tongue: 0.7, attached: false },
+        { state: 'hunt', kind: 'hunt', f: 0.06, rage: 1, prey, tongue: 1, attached: true },
+      ];
+      for (const L of looks) {
+        this.maw = Object.assign({}, base, L);
+        this.mawX = this.camX + L.f * this.W;
+        c.clearRect(0, 0, this.W, this.H);
+        try { this.drawMaw(c); } catch (e) { /* 이 모양만 건너뜀 */ }
+      }
+      this.maw = savedMaw; this.mawX = savedMawX;
+      const ghost = Object.assign({}, prey, { x: this.camX + this.W * 0.5, y: lane });
+      try { this.drawAngel(c, { R: ghost, sx: 0.5, t: 0.5, T: 1.5, landed: false }); } catch (e) { /* 건너뜀 */ }
+      try { this.drawHeart(c, { x: this.camX + this.W * 0.5, y: lane, t: 0 }); } catch (e) { /* 건너뜀 */ }
+    } catch (e) { /* 미리 해 두기만 실패 */ }
+    this.maw = savedMaw; this.mawX = savedMawX;
   }
 
   /* ===== 메인 루프 ===== */
