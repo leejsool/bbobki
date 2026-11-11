@@ -95,6 +95,12 @@ const HIP_Y = 0.62, LEG = 0.56;   // 엉덩이 높이, 허벅지·종아리 길�
 const SHO_X = 0.96, SHO_Y = 0.1, ARM = 0.62;   // 어깨: 몸통(얼굴) 가장자리에 붙는다 / 위팔·아래팔 길이
 const INK = 'rgba(8,11,28,.6)';   // 팔다리 테두리 (몸 앞에 겹쳐도 또렷하게)
 
+// 웹폰트가 도착할 때마다 올라간다. 이름표 글자 폭 캐시를 다시 재는 신호
+let FONT_GEN = 0;
+if (document.fonts && document.fonts.addEventListener) {
+  document.fonts.addEventListener('loadingdone', () => { FONT_GEN++; });
+}
+
 /** 두 마디 관절: (ax,ay)에서 (bx,by)까지 잇되, 꺾이는 마디가 (hx,hy) 쪽을 향한다. 닿지 않으면 쭉 늘어난다 */
 function bend2(ax, ay, bx, by, l1, l2, hx, hy) {
   const dx = bx - ax, dy = by - ay, d = Math.hypot(dx, dy) || 1e-6;
@@ -430,18 +436,24 @@ class RaceGame {
     this.raf = 0;
     this.running = false;
     this.speed = 1;                        // 진행 배속 (1 또는 2)
+    this.dprCap = 2;                       // 화면 선명도 상한. 프레임이 계속 느리면 loop() 가 자동으로 낮춘다
+    this._ema = 0; this._slow = 0;         // 프레임 간격의 이동평균 / 연속으로 느린 프레임 수
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
   }
 
   /* ===== 준비 ===== */
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const dpr = Math.min(window.devicePixelRatio || 1, this.dprCap);
     const w = this.cv.clientWidth || window.innerWidth;
     const h = this.cv.clientHeight || window.innerHeight;
     this.cv.width = Math.round(w * dpr);
     this.cv.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // 하늘 그라데이션은 화면 크기가 정해질 때 한 번만 만든다
+    this.sky = this.ctx.createLinearGradient(0, 0, 0, h);
+    this.sky.addColorStop(0, '#151d3c');
+    this.sky.addColorStop(1, '#0a0e20');
 
     const oldTop = this.top, oldH = this.trackH;
     this.W = w;
@@ -599,11 +611,30 @@ class RaceGame {
     if (!this.running) return;
     this.raf = requestAnimationFrame(() => this.loop());
     const now = performance.now();
-    const dt = Math.min((now - this.last) / 1000, 1 / 24);
+    const raw = now - this.last;
+    const dt = Math.min(raw / 1000, 1 / 24);
     this.last = now;
+    this.adaptQuality(raw);
     // 배속: 한 번에 크게 건너뛰면 장애물을 뚫고 지나가므로, 같은 걸음을 여러 번 밟는다
     for (let i = 0; i < this.speed && this.running; i++) this.update(dt);
     this.draw();
+  }
+
+  /**
+   * 느린 기기(오래된 태블릿 등)는 화면 해상도를 낮춰 프레임을 지킨다.
+   * 프레임 간격의 이동평균이 계속 23ms(약 43fps)를 넘으면 해상도 상한을 0.5 단계씩 1 까지 내린다.
+   * 한 번 내리면 이 화면에서는 다시 올리지 않는다 (올렸다 내렸다 하면 화면이 깜빡인다).
+   */
+  adaptQuality(rawMs) {
+    if (rawMs > 250) return;                              // 탭을 떠났다 돌아온 간격 등은 재지 않는다
+    this._ema = this._ema ? this._ema * 0.94 + rawMs * 0.06 : rawMs;
+    if (this._ema <= 23) { this._slow = 0; return; }
+    if (++this._slow < 90) return;                        // 약 1.5초 동안 계속 느릴 때만
+    const cur = Math.min(window.devicePixelRatio || 1, this.dprCap);
+    this._slow = 0; this._ema = 0;
+    if (cur <= 1) return;                                 // 더 낮출 수 없다
+    this.dprCap = Math.max(1, cur - 0.5);
+    this.resize();
   }
 
   update(dt) {
@@ -1909,10 +1940,7 @@ class RaceGame {
     }
 
     /* 배경 */
-    const sky = c.createLinearGradient(0, 0, 0, H);
-    sky.addColorStop(0, '#151d3c');
-    sky.addColorStop(1, '#0a0e20');
-    c.fillStyle = sky;
+    c.fillStyle = this.sky;
     c.fillRect(-30, -30, W + 60, H + 60);
 
     /* 트랙 */
@@ -1920,10 +1948,12 @@ class RaceGame {
     c.fillRect(-30, this.top, W + 60, this.trackH);
 
     // 흐르는 줄무늬
+    // 무늬는 밝은 줄+어두운 줄이 한 쌍(주기 step*2)이다. 오프셋도 같은 주기로 잡아야 끊김 없이 흐른다
+    // (예전엔 step 으로 나눈 나머지를 써서 130px 마다 무늬가 뒤집히며 뚝뚝 끊겼다)
     c.fillStyle = 'rgba(255,255,255,.028)';
-    const step = 130;
-    const off = -(this.camX % step);
-    for (let x = off - step; x < W + step; x += step * 2) c.fillRect(x, this.top, step, this.trackH);
+    const step = 130, period = step * 2;
+    const off = -(((this.camX % period) + period) % period);
+    for (let x = off; x < W; x += period) c.fillRect(x, this.top, step, this.trackH);
 
     // 가장자리
     c.fillStyle = '#ffd23f';
@@ -2096,29 +2126,29 @@ class RaceGame {
         shine.moveTo(cx + sr * 0.8 * Math.cos(-1.15), y + sr * 0.8 * Math.sin(-1.15));
         shine.arc(cx, y, sr * 0.8, -1.15, 0.35);
       }
-      c.save(); c.translate(r * 0.1, r * 0.04);            // 앞 비늘 위로 떨어지는 그늘
-      c.fillStyle = `rgba(2,0,8,${0.55 * fade})`; c.fill(disc);
-      c.restore();
+      if (j < 6) {                                         // 앞 비늘 위로 떨어지는 그늘 (깊은 줄은 어두워서 티가 안 난다)
+        c.save(); c.translate(r * 0.1, r * 0.04);
+        c.fillStyle = `rgba(2,0,8,${0.55 * fade})`; c.fill(disc);
+        c.restore();
+      }
       c.fillStyle = `hsla(${hue},60%,${19 + rage * 6 - j * 1.25}%,${fade})`;
       c.fill(disc);
       c.strokeStyle = `hsla(${hue + 16},92%,${62 + rage * 8}%,${0.6 * fade * (1 - j / (cols + 3))})`;
       c.stroke(shine);
     }
     // 옆구리의 빛점: 빛이 위에서 아래로 차례차례 흐른다 (화나면 붉게)
+    // (줄마다 그라데이션을 새로 만들지 않고, 미리 그려 둔 빛 그림을 투명도만 바꿔 찍는다)
     c.globalCompositeOperation = 'lighter';
-    const spotHue = lerp(172, 18, rage);
+    const spotImg = this.glowOf('spot', lerp(172, 18, rage));
     for (let i = 0; i * r * 2.1 < H + r; i++) {
       const y = i * r * 2.1 + r * 0.5, x = edge(y) - r * (4.1 + 0.7 * Math.sin(i * 1.7));
       if (x < -r) continue;
       const a = 0.18 + 0.82 * Math.pow(0.5 + 0.5 * Math.sin(T * 3.4 - i * 0.85), 3);
       const rr = r * (0.75 + 0.2 * Math.sin(i * 2.3));
-      const sg = c.createRadialGradient(x, y, 0, x, y, rr);
-      sg.addColorStop(0, `hsla(${spotHue},100%,80%,${0.95 * a})`);
-      sg.addColorStop(0.22, `hsla(${spotHue},100%,58%,${0.5 * a})`);
-      sg.addColorStop(1, `hsla(${spotHue},100%,50%,0)`);
-      c.fillStyle = sg;
-      c.fillRect(x - rr, y - rr, rr * 2, rr * 2);
+      c.globalAlpha = a;
+      c.drawImage(spotImg, x - rr, y - rr, rr * 2, rr * 2);
     }
+    c.globalAlpha = 1;
     c.globalCompositeOperation = 'source-over';
     // 앞선 안쪽으로 배어드는 빛
     c.save();
@@ -2857,20 +2887,16 @@ class RaceGame {
     const r = this.r, x = h.x - this.camX;
     if (x < -r * 3 || x > this.W + r * 3) return;
     const y = h.y - r * 0.4 + Math.sin(h.t * 3) * r * 0.25, s = r * 0.85;
-    const glow = c.createRadialGradient(x, y, 1, x, y, r * 2.6);
-    glow.addColorStop(0, 'rgba(255,225,120,.55)');
-    glow.addColorStop(1, 'rgba(255,225,120,0)');
-    c.fillStyle = glow;
-    c.beginPath(); c.arc(x, y, r * 2.6, 0, Math.PI * 2); c.fill();
+    c.globalAlpha = 0.75;                                               // 금빛 번짐 (미리 그려 둔 빛 그림)
+    c.drawImage(this.glowOf('halo', 45), x - r * 2.6, y - r * 2.6, r * 5.2, r * 5.2);
+    c.globalAlpha = 1;
     const flap = Math.sin(h.t * 9);
     for (const sd of [-1, 1]) this.drawWing(c, x + sd * s * 0.62, y - s * 0.05, sd, s * 1.5, flap, false);
     const g = c.createLinearGradient(x - s, y - s, x + s, y + s);
     g.addColorStop(0, '#fff3a6'); g.addColorStop(0.45, '#ffc824'); g.addColorStop(1, '#c98400');
     this.heartPath(c, x, y, s);
     c.fillStyle = g;
-    c.shadowColor = '#ffd84a'; c.shadowBlur = 14;
     c.fill();
-    c.shadowBlur = 0;
     c.strokeStyle = '#8a5a00'; c.lineWidth = 2; c.stroke();
     c.fillStyle = 'rgba(255,255,255,.75)';                              // 반짝
     c.beginPath(); c.ellipse(x - s * 0.42, y - s * 0.3, s * 0.18, s * 0.11, -0.6, 0, Math.PI * 2); c.fill();
@@ -3326,9 +3352,12 @@ class RaceGame {
           c.fillStyle = g;
           c.beginPath(); c.arc(sx, o.y, mr, 0, Math.PI * 2); c.fill();
           c.fillStyle = blink ? '#ff3040' : '#6a0f18';
-          if (blink) { c.shadowColor = '#ff2a3a'; c.shadowBlur = 16; }
+          if (blink) {                                                  // 깜빡일 때 붉게 번진다
+            c.globalAlpha = 0.9;
+            c.drawImage(this.glowOf('halo', 355), sx - mr * 1.5, o.y - mr * 1.5, mr * 3, mr * 3);
+            c.globalAlpha = 1;
+          }
           c.beginPath(); c.arc(sx, o.y, mr * 0.42, 0, Math.PI * 2); c.fill();
-          c.shadowBlur = 0;
         } else {
           // 그을린 자국은 남고, 불덩이는 금세 사라진다
           const fade = clamp(1 - (o.t - 0.5) / 2.5, 0, 1);
@@ -3436,6 +3465,7 @@ class RaceGame {
 
   /** 다리와 신발 (몸보다 먼저 그려서 허벅지 위쪽은 몸에 가린다) */
   drawLegs(c, R, q, sx, y, r, moon) {
+    const tint = this.tintOf(R);
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const sd of [-1, 1]) {
       const f = sd < 0 ? q.fl : q.fr, tip = f[2] || 0;
@@ -3446,7 +3476,7 @@ class RaceGame {
       c.beginPath();
       c.moveTo(sx + hx * r, y + HIP_Y * r); c.lineTo(sx + kx * r, y + ky * r); c.lineTo(sx + ax * r, y + ay * r);
       c.strokeStyle = INK; c.lineWidth = r * 0.3 + 3; c.stroke();
-      c.strokeStyle = `hsl(${R.hue},60%,36%)`; c.lineWidth = r * 0.3; c.stroke();
+      c.strokeStyle = tint.leg; c.lineWidth = r * 0.3; c.stroke();
       if (moon) {                                                         // 반짝이는 흰 양말
         const dx = kx - ax, dy = ky - ay, d = Math.hypot(dx, dy) || 1;
         c.strokeStyle = '#fff'; c.lineWidth = r * 0.3; c.lineCap = 'butt';
@@ -3456,7 +3486,7 @@ class RaceGame {
         c.lineCap = 'round';
       }
       const fwd = side ? 0.13 : sd * 0.07;
-      c.fillStyle = moon ? '#0c0d12' : `hsl(${R.hue},65%,24%)`;
+      c.fillStyle = moon ? '#0c0d12' : tint.shoe;
       c.beginPath();
       c.ellipse(sx + (ax + fwd) * r, y + (ay + 0.05 + tip * 0.07) * r, r * (side ? 0.3 : 0.24), r * 0.15,
         tip * (side ? 0.85 : sd * 0.5), 0, Math.PI * 2);
@@ -3471,6 +3501,7 @@ class RaceGame {
 
   /** 팔과 손 (몸 앞에 그린다) */
   drawArms(c, R, q, sx, y, r) {
+    const tint = this.tintOf(R);
     c.lineCap = 'round'; c.lineJoin = 'round';
     for (const sd of [-1, 1]) {
       const t = sd < 0 ? q.al : q.ar, hint = sd < 0 ? q.el : q.er, shape = sd < 0 ? q.hl : q.hr;
@@ -3479,9 +3510,9 @@ class RaceGame {
       c.beginPath();
       c.moveTo(sx + shx * r, y + SHO_Y * r); c.lineTo(sx + ex * r, y + ey * r); c.lineTo(sx + t[0] * r, y + t[1] * r);
       c.strokeStyle = INK; c.lineWidth = r * 0.3 + 3; c.stroke();
-      c.strokeStyle = `hsl(${R.hue},68%,38%)`; c.lineWidth = r * 0.3; c.stroke();
+      c.strokeStyle = tint.arm; c.lineWidth = r * 0.3; c.stroke();
       const hx = sx + t[0] * r, hy = y + t[1] * r;
-      const skin = shape === 'glove' ? '#fff' : `hsl(${R.hue},95%,${shape ? 74 : 66}%)`;
+      const skin = shape === 'glove' ? '#fff' : shape ? tint.skinHi : tint.skin;
       if (shape === 'thumb' || shape === 'L' || shape === 'point') {      // 손가락
         c.beginPath();
         if (shape === 'point') {
@@ -3503,7 +3534,8 @@ class RaceGame {
   /** 모자·목도리 같은 꾸밈 (이름에서 정해진다). 춤 소품이 있으면 모자 자리는 소품이 차지한다 */
   drawGear(c, R, sx, y, r, prop) {
     const L = R.look;
-    const A = `hsl(${L.accHue},85%,60%)`, A2 = `hsl(${L.accHue},75%,40%)`;
+    if (L._A === undefined) { L._A = `hsl(${L.accHue},85%,60%)`; L._A2 = `hsl(${L.accHue},75%,40%)`; }
+    const A = L._A, A2 = L._A2;
     const acc = prop === 'fedora' && (L.acc === 'cap' || L.acc === 'beanie' || L.acc === 'headband') ? 'none' : L.acc;
     c.lineCap = 'round'; c.lineJoin = 'round';
     switch (acc) {
@@ -3585,6 +3617,56 @@ class RaceGame {
     }
   }
 
+  /**
+   * 번지는 빛 그림 (한 번 그려 두고 크기·투명도만 바꿔 찍는다).
+   * 프레임마다 방사형 그라데이션을 새로 만들거나 shadowBlur 를 쓰는 것보다 훨씬 가볍다.
+   * kind 'halo': 단색이 가운데서 옅어짐 / 'spot': 가운데 흰빛 + 색 테두리 (옆구리 빛점)
+   * 색상은 3도 단위로 묶어 캐시가 무한히 늘지 않게 한다.
+   */
+  glowOf(kind, hue) {
+    const h = ((Math.round(hue / 3) * 3) % 360 + 360) % 360;
+    const key = kind + h;
+    const cache = this._glows || (this._glows = new Map());
+    let cv = cache.get(key);
+    if (!cv) {
+      const S = 64, h2 = S / 2;
+      cv = document.createElement('canvas');
+      cv.width = cv.height = S;
+      const g = cv.getContext('2d');
+      const rg = g.createRadialGradient(h2, h2, 0, h2, h2, h2);
+      if (kind === 'spot') {
+        rg.addColorStop(0, `hsla(${h},100%,80%,.95)`);
+        rg.addColorStop(0.22, `hsla(${h},100%,58%,.5)`);
+        rg.addColorStop(1, `hsla(${h},100%,50%,0)`);
+      } else {
+        rg.addColorStop(0, `hsla(${h},100%,72%,.9)`);
+        rg.addColorStop(0.45, `hsla(${h},100%,72%,.45)`);
+        rg.addColorStop(1, `hsla(${h},100%,72%,0)`);
+      }
+      g.fillStyle = rg;
+      g.fillRect(0, 0, S, S);
+      cache.set(key, cv);
+    }
+    return cv;
+  }
+
+  /** 아이마다 정해진 색 문자열 (프레임마다 새로 만들어 파싱하지 않도록 한 번만 만든다) */
+  tintOf(R) {
+    let t = R._tint;
+    if (!t || t.hue !== R.hue) {
+      const h = R.hue;
+      t = R._tint = {
+        hue: h,
+        dark: `hsl(${h},70%,42%)`, leg: `hsl(${h},60%,36%)`, shoe: `hsl(${h},65%,24%)`, arm: `hsl(${h},68%,38%)`,
+        skin: `hsl(${h},95%,66%)`, skinHi: `hsl(${h},95%,74%)`, foxIn: `hsl(${h},90%,80%)`,
+        tailStripe: `hsl(${h},85%,78%)`, belly: `hsla(${h},100%,90%,.42)`,
+        suit: `hsla(${h},70%,30%,.42)`, spots: `hsla(${h},65%,30%,.5)`, ring: `hsla(${h},90%,72%,.5)`,
+        grad: null, gradR: 0,
+      };
+    }
+    return t;
+  }
+
   drawRunner(c, R, ghost) {
     let sx = R.x - this.camX;
     if (sx < -90 || sx > this.W + 90) return;
@@ -3656,7 +3738,8 @@ class RaceGame {
     }
 
     const L = R.look;
-    const dark = `hsl(${R.hue},70%,42%)`;
+    const tint = this.tintOf(R);
+    const dark = tint.dark;
     const prop = cel ? cel.prop : '';
     // 탈락해 사라지는 아이도 같은 몸으로 그린다 (팔다리는 기절한 듯 축 늘어뜨린다)
     const limb = this.limbsOf(R, cel, { air, dz: dz || ghost, scared, strug, sqz, ghost });
@@ -3695,7 +3778,7 @@ class RaceGame {
       if (L.tailStripes) {
         c.save();
         c.clip();
-        c.strokeStyle = `hsl(${R.hue},85%,78%)`;
+        c.strokeStyle = tint.tailStripe;
         c.lineWidth = r * 0.16; c.lineCap = 'butt';
         c.beginPath();
         for (const i of [3, 5, 7, 9]) {
@@ -3729,7 +3812,7 @@ class RaceGame {
           c.lineTo(sx + s * r * 0.66, y - r * tall);
           c.closePath(); c.fill();
           if (L.ears === 'fox') {                      // 귀 안쪽
-            c.fillStyle = `hsl(${R.hue},90%,80%)`;
+            c.fillStyle = tint.foxIn;
             c.beginPath();
             c.moveTo(sx + s * r * 0.66, y - r * 0.58);
             c.lineTo(sx + s * r * 0.36, y - r * 0.72);
@@ -3744,27 +3827,46 @@ class RaceGame {
     // 몸 (공중이면 길쭉하게 늘어나고 하얗게 빛난다)
     // 커지는 것(S)이 점프의 주된 표현이라 길쭉하게 늘이는 건 조금만
     const rx = r * (1 - air * 0.07 + sqz * 0.35), ry = r * (1 + air * 0.1 - sqz * 0.35);
-    const g = c.createRadialGradient(sx - r * 0.35, y - r * 0.4, 1, sx, y, r * 1.25);
-    g.addColorStop(0, `hsl(${R.hue},95%,${76 + air * 18}%)`);
-    g.addColorStop(1, `hsl(${R.hue},80%,${48 + air * 22}%)`);
-    if (air > 0) { c.shadowColor = `hsl(${R.hue},100%,72%)`; c.shadowBlur = 18 * air; }
-    c.fillStyle = g;
-    c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.fill();
-    c.shadowBlur = 0;
+    // 공중에서는 몸 둘레가 빛난다 (shadowBlur 는 느린 기기에서 무거워서 미리 그려 둔 빛 그림을 깐다)
+    if (air > 0.02) {
+      const ga = c.globalAlpha, gr = r * (1.55 + 0.5 * air);
+      c.globalAlpha = ga * Math.min(1, air * 1.1);
+      c.drawImage(this.glowOf('halo', R.hue), sx - gr, y - gr, gr * 2, gr * 2);
+      c.globalAlpha = ga;
+    }
+    if (air < 0.02) {
+      // 땅에 있을 때(거의 늘 그렇다)는 몸 중심 기준으로 만든 그라데이션을 재사용한다
+      if (tint.gradR !== r) {
+        const gg = c.createRadialGradient(-r * 0.35, -r * 0.4, 1, 0, 0, r * 1.25);
+        gg.addColorStop(0, `hsl(${R.hue},95%,76%)`);
+        gg.addColorStop(1, `hsl(${R.hue},80%,48%)`);
+        tint.grad = gg; tint.gradR = r;
+      }
+      c.translate(sx, y);
+      c.fillStyle = tint.grad;
+      c.beginPath(); c.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2); c.fill();
+      c.translate(-sx, -y);
+    } else {
+      const g = c.createRadialGradient(sx - r * 0.35, y - r * 0.4, 1, sx, y, r * 1.25);
+      g.addColorStop(0, `hsl(${R.hue},95%,${76 + air * 18}%)`);
+      g.addColorStop(1, `hsl(${R.hue},80%,${48 + air * 22}%)`);
+      c.fillStyle = g;
+      c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.fill();
+    }
     c.strokeStyle = air > 0.15 ? `rgba(255,255,255,${0.35 + air * 0.55})` : 'rgba(0,0,0,.28)';
     c.lineWidth = air > 0.15 ? 2.4 : 1.6;
     c.stroke();
 
     // 배 (밝은 색 배)
     if (L.belly) {
-      c.fillStyle = `hsla(${R.hue},100%,90%,.42)`;
+      c.fillStyle = tint.belly;
       c.beginPath(); c.ellipse(sx + r * 0.05, y + ry * 0.42, rx * 0.5, ry * 0.4, 0, 0, Math.PI * 2); c.fill();
     }
     // 줄무늬 옷 (몸 모양 안쪽으로만 칠한다)
     if (L.stripes) {
       c.save();
       c.beginPath(); c.ellipse(sx, y, rx, ry, 0, 0, Math.PI * 2); c.clip();
-      c.strokeStyle = `hsla(${R.hue},70%,30%,.42)`;
+      c.strokeStyle = tint.suit;
       c.lineWidth = r * 0.17; c.lineCap = 'butt';
       c.beginPath();
       for (const k of [0.36, 0.7]) {
@@ -3780,7 +3882,7 @@ class RaceGame {
 
     // 점박이 무늬
     if (L.spots) {
-      c.fillStyle = `hsla(${R.hue},65%,30%,.5)`;
+      c.fillStyle = tint.spots;
       c.beginPath(); c.arc(sx - r * 0.44, y + r * 0.34, r * 0.23, 0, Math.PI * 2); c.fill();
       c.beginPath(); c.arc(sx + r * 0.42, y + r * 0.46, r * 0.16, 0, Math.PI * 2); c.fill();
       c.beginPath(); c.arc(sx + r * 0.52, y - r * 0.44, r * 0.12, 0, Math.PI * 2); c.fill();
@@ -3951,6 +4053,7 @@ class RaceGame {
    */
   drawLabels(c, list) {
     const boxes = [];
+    let lastFont = '';
     c.textAlign = 'center';
     const ease = 1 - Math.pow(0.002, this._dt || 1 / 60);
     const ordered = list.slice().sort((a, b) => a.seq - b.seq);
@@ -3961,8 +4064,12 @@ class RaceGame {
       const r = this.r;
       const big = this.phase === 'done' && R === this.winner;
       const fs = big ? Math.max(24, r * 1.5) : Math.max(13, r * 0.8);
-      c.font = `700 ${fs}px Gothic A1, sans-serif`;
-      const w = c.measureText(R.name).width;
+      // 글꼴 문자열 설정과 글자 폭 재기는 매 프레임 하면 비싸다. 크기가 바뀔 때만 다시 한다
+      // (웹폰트가 늦게 도착하면 폭이 달라지므로 FONT_GEN 이 바뀌었을 때도 다시 잰다)
+      if (R._lfs !== fs) { R._lfs = fs; R._lfont = `700 ${fs}px Gothic A1, sans-serif`; R._lw = undefined; }
+      if (lastFont !== R._lfont) { c.font = R._lfont; lastFont = R._lfont; }
+      if (R._lw === undefined || R._lgen !== FONT_GEN) { R._lw = c.measureText(R.name).width; R._lgen = FONT_GEN; }
+      const w = R._lw;
 
       // 점프는 완만한 곡선이라 따라가도 되지만, bob 은 너무 빨라 뺀다.
       // 아이를 들고 있으면 이름표는 머리 위 아이보다 더 위로
