@@ -3575,14 +3575,33 @@ class RaceGame {
       c.strokeStyle = tint.arm; c.lineWidth = r * 0.3; c.stroke();
       const hx = sx + t[0] * r, hy = y + t[1] * r;
       const skin = shape === 'glove' ? '#fff' : shape ? tint.skinHi : tint.skin;
-      if (shape === 'thumb' || shape === 'L' || shape === 'point') {      // 손가락
+      if (shape === 'L') {
+        /* 주먹을 쥐고 검지는 위로, 엄지는 몸 중심 쪽으로 편 'L'.
+           윤곽선을 먼저 한꺼번에 깔고 살색을 그 위에 덮어, 손가락과 주먹이 한 덩어리로 이어져 보이게 한다. */
+        const rf = r * 0.36, wi = r * 0.24, wt = r * 0.22;               // 주먹 반지름, 검지·엄지 굵기
+        const kx = hx - sd * r * 0.12, ky = hy - r * 0.2;                // L 의 꺾이는 자리 (주먹의 안쪽 위)
+        const ix = kx, iy = ky - r * 0.6;                                // 검지 끝
+        const tx = kx - sd * r * 0.62, ty = ky + r * 0.04;               // 엄지 끝
+        c.lineCap = 'round';
+        c.fillStyle = INK; c.strokeStyle = INK;
+        c.beginPath(); c.arc(hx, hy, rf + 1.6, 0, Math.PI * 2); c.fill();
+        c.lineWidth = wi + 3.2; c.beginPath(); c.moveTo(kx, ky); c.lineTo(ix, iy); c.stroke();
+        c.lineWidth = wt + 3.2; c.beginPath(); c.moveTo(kx, ky); c.lineTo(tx, ty); c.stroke();
+        c.fillStyle = skin; c.strokeStyle = skin;
+        c.beginPath(); c.arc(hx, hy, rf, 0, Math.PI * 2); c.fill();
+        c.lineWidth = wi; c.beginPath(); c.moveTo(kx, ky); c.lineTo(ix, iy); c.stroke();
+        c.lineWidth = wt; c.beginPath(); c.moveTo(kx, ky); c.lineTo(tx, ty); c.stroke();
+        c.strokeStyle = INK; c.lineWidth = 1.3;                          // 접은 손가락 마디
+        c.beginPath(); c.arc(hx, hy, rf * 0.62, 0.35 * Math.PI, 0.95 * Math.PI, sd > 0); c.stroke();
+        continue;
+      }
+      if (shape === 'thumb' || shape === 'point') {      // 손가락
         c.beginPath();
         if (shape === 'point') {
           const dx = t[0] - ex, dy = t[1] - ey, d = Math.hypot(dx, dy) || 1;
           c.moveTo(hx, hy); c.lineTo(hx + (dx / d) * r * 0.55, hy + (dy / d) * r * 0.55);
         } else {
-          c.moveTo(hx, hy); c.lineTo(hx, hy - r * (shape === 'L' ? 0.82 : 0.5));
-          if (shape === 'L') { c.moveTo(hx, hy); c.lineTo(hx - sd * r * 0.7, hy); }   // 엄지는 어느 손이든 몸 중심 쪽을 향한다
+          c.moveTo(hx, hy); c.lineTo(hx, hy - r * 0.5);
         }
         c.strokeStyle = INK; c.lineWidth = r * 0.2 + 3; c.stroke();
         c.strokeStyle = skin; c.lineWidth = r * 0.2; c.stroke();
@@ -4102,6 +4121,49 @@ class RaceGame {
 
     // 팔과 손 (달리기, 점프, 버둥거림, 들어 올리기, 춤 모두 여기서 그린다)
     if (limb) this.drawArms(c, R, limb, sx, y, r);
+    c.restore();
+
+    if (cel && R.dance === 'takel') this.drawTakelBubble(c, sx, y, r);
+  }
+
+  /**
+   * 'L을 가져가' 를 출 때 머리 옆에 뜨는 말풍선.
+   * 톡 나타났다가 잠시 머문 뒤, 위로 떠오르며 흐려져 사라지기를 되풀이한다.
+   */
+  drawTakelBubble(c, sx, y, r) {
+    const P = 2.4, k = (this.time % P) / P;
+    const a = k < 0.1 ? k / 0.1 : k < 0.5 ? 1 : 1 - (k - 0.5) / 0.5;                 // 나타남 -> 머묾 -> 흐려짐
+    const rise = k < 0.5 ? 0 : (k - 0.5) / 0.5;                                         // 뒤쪽 절반 동안 위로
+    const pop = k < 0.1 ? 0.8 + 2 * k : 1;                                              // 처음엔 살짝 작게 시작해 톡 커진다
+    if (a <= 0.01) return;
+    const fs = Math.max(12, r * 0.7), text = 'L을 가져가';
+    const font = `700 ${fs}px Gothic A1, sans-serif`;
+    c.save();
+    c.font = font; c.textAlign = 'center'; c.textBaseline = 'middle';
+    if (this._bubFont !== font || this._bubGen !== FONT_GEN) {
+      this._bubFont = font; this._bubGen = FONT_GEN; this._bubW = c.measureText(text).width;
+    }
+    const padX = fs * 0.6, w = this._bubW + padX * 2, h = fs * 1.7;
+    const right = sx - r * 0.35, left = Math.max(4, right - w);
+    const bx = left, by = y - r * 1.55 - h - rise * r * 1.0;
+    const cx = bx + w / 2, cy = by + h / 2;
+    c.globalAlpha = a;
+    c.translate(cx, cy); c.scale(pop, pop); c.translate(-cx, -cy);
+    const rad = h / 2;
+    c.beginPath();                                                                      // 알약 모양 + 머리를 가리키는 꼬리
+    c.moveTo(bx + rad, by);
+    c.arcTo(bx + w, by, bx + w, by + h, rad);
+    c.arcTo(bx + w, by + h, bx, by + h, rad);
+    c.lineTo(bx + w - rad * 0.9, by + h);
+    c.lineTo(bx + w + r * 0.18, by + h + r * 0.42);                                     // 꼬리 끝
+    c.lineTo(bx + w - rad * 1.7, by + h);
+    c.arcTo(bx, by + h, bx, by, rad);
+    c.arcTo(bx, by, bx + w, by, rad);
+    c.closePath();
+    c.fillStyle = '#fff'; c.fill();
+    c.strokeStyle = INK; c.lineWidth = 2; c.lineJoin = 'round'; c.stroke();
+    c.fillStyle = '#1a1d2e';
+    c.fillText(text, cx, cy + fs * 0.04);
     c.restore();
   }
 
