@@ -235,7 +235,7 @@ function runGame(cls) {
       onCountdown(text) {
         if (text === null) { el.countdown.hidden = true; return; }
         Sound.play(text === '출발!' ? 'go' : 'countdown');
-        if (text === '출발!') Sound.startMusic();       // 3, 2, 1 이 끝나면 배경음 시작
+        if (text === '1') Sound.startMusic();           // '1' 에 튼다. 음악 첫 소리가 1초 뒤(= 출발!)에 나오게 앞을 비워 두었다
         el.countdown.hidden = false;
         const span = el.countdown.firstElementChild;
         span.textContent = text;
