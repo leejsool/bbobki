@@ -3576,23 +3576,30 @@ class RaceGame {
       const hx = sx + t[0] * r, hy = y + t[1] * r;
       const skin = shape === 'glove' ? '#fff' : shape ? tint.skinHi : tint.skin;
       if (shape === 'L') {
-        /* 주먹을 쥐고 검지는 위로, 엄지는 몸 중심 쪽으로 편 'L'.
-           윤곽선을 먼저 한꺼번에 깔고 살색을 그 위에 덮어, 손가락과 주먹이 한 덩어리로 이어져 보이게 한다. */
-        const rf = r * 0.36, wi = r * 0.24, wt = r * 0.22;               // 주먹 반지름, 검지·엄지 굵기
-        const kx = hx - sd * r * 0.12, ky = hy - r * 0.2;                // L 의 꺾이는 자리 (주먹의 안쪽 위)
-        const ix = kx, iy = ky - r * 0.6;                                // 검지 끝
-        const tx = kx - sd * r * 0.62, ty = ky + r * 0.04;               // 엄지 끝
-        c.lineCap = 'round';
-        c.fillStyle = INK; c.strokeStyle = INK;
-        c.beginPath(); c.arc(hx, hy, rf + 1.6, 0, Math.PI * 2); c.fill();
-        c.lineWidth = wi + 3.2; c.beginPath(); c.moveTo(kx, ky); c.lineTo(ix, iy); c.stroke();
-        c.lineWidth = wt + 3.2; c.beginPath(); c.moveTo(kx, ky); c.lineTo(tx, ty); c.stroke();
-        c.fillStyle = skin; c.strokeStyle = skin;
-        c.beginPath(); c.arc(hx, hy, rf, 0, Math.PI * 2); c.fill();
-        c.lineWidth = wi; c.beginPath(); c.moveTo(kx, ky); c.lineTo(ix, iy); c.stroke();
-        c.lineWidth = wt; c.beginPath(); c.moveTo(kx, ky); c.lineTo(tx, ty); c.stroke();
-        c.strokeStyle = INK; c.lineWidth = 1.3;                          // 접은 손가락 마디
-        c.beginPath(); c.arc(hx, hy, rf * 0.62, 0.35 * Math.PI, 0.95 * Math.PI, sd > 0); c.stroke();
+        /* 손바닥이 앞을 향한 채 중지·약지·새끼를 접은 주먹은 오른쪽의 둥근 덩어리,
+           그 왼쪽 옆에 검지를 곧게 세우고, 검지 밑동에서 엄지를 몸 중심 쪽으로 뻗은 'L'.
+           좌표 단위 u 는 주먹 반지름이고 주먹 한가운데가 원점이다. 윤곽을 먼저 깔고 살색을 덮어 한 덩어리로 보인다. */
+        const u = r * 0.34;
+        const parts = [
+          () => c.arc(0.05, 0.12, 1.12, 0, TAU),                                            // 접은 세 손가락 = 주먹
+          () => {                                                                   // 검지: 주먹의 왼쪽 옆에서 위로
+            c.moveTo(-1.52, 0.3); c.lineTo(-1.52, -2.64); c.arc(-1.16, -2.64, 0.36, Math.PI, 0); c.lineTo(-0.8, 0.3); c.closePath();
+          },
+          () => {                                                                   // 엄지: 검지 밑동에서 왼쪽으로, 끝은 가늘게
+            c.moveTo(-1.2, -0.9); c.lineTo(-3.3, -0.68); c.arc(-3.3, -0.44, 0.24, -Math.PI / 2, Math.PI / 2, true); c.lineTo(-1.2, 0.1); c.closePath();
+          },
+          () => {                                                                   // 손바닥 밑동: 엄지 아래와 주먹 사이를 메운다
+            c.moveTo(-1.6, 0.1); c.lineTo(-0.5, 0.2); c.lineTo(-0.5, 1.0); c.lineTo(-1.1, 1.2); c.lineTo(-1.55, 0.5); c.closePath();
+          },
+        ];
+        c.save();
+        c.translate(hx, hy); c.scale(sd * u, u);                                    // 왼손이면 좌우를 뒤집는다 (엄지는 늘 몸 중심 쪽)
+        c.lineJoin = 'round'; c.lineWidth = 3.2 / u; c.strokeStyle = INK;
+        for (const ink of [true, false]) {
+          c.fillStyle = ink ? INK : skin;
+          for (const p of parts) { c.beginPath(); p(); c.fill(); if (ink) c.stroke(); }
+        }
+        c.restore();
         continue;
       }
       if (shape === 'thumb' || shape === 'point') {      // 손가락
@@ -4132,6 +4139,7 @@ class RaceGame {
    */
   drawTakelBubble(c, sx, y, r) {
     const P = 2.4, k = (this.time % P) / P;
+    const side = Math.floor(this.time / P) % 2 ? 1 : -1;                                // 한 번은 왼쪽, 한 번은 오른쪽
     const a = k < 0.1 ? k / 0.1 : k < 0.5 ? 1 : 1 - (k - 0.5) / 0.5;                 // 나타남 -> 머묾 -> 흐려짐
     const rise = k < 0.5 ? 0 : (k - 0.5) / 0.5;                                         // 뒤쪽 절반 동안 위로
     const pop = k < 0.1 ? 0.8 + 2 * k : 1;                                              // 처음엔 살짝 작게 시작해 톡 커진다
@@ -4144,21 +4152,22 @@ class RaceGame {
       this._bubFont = font; this._bubGen = FONT_GEN; this._bubW = c.measureText(text).width;
     }
     const padX = fs * 0.6, w = this._bubW + padX * 2, h = fs * 1.7;
-    const right = sx - r * 0.35, left = Math.max(4, right - w);
-    const bx = left, by = y - r * 1.55 - h - rise * r * 1.0;
+    const bx = side < 0 ? Math.max(4, sx - r * 0.35 - w) : Math.min(this.W - 4 - w, sx + r * 0.6);
+    const by = y - r * 1.55 - h - rise * r * 1.0;
     const cx = bx + w / 2, cy = by + h / 2;
+    const X = (x) => (side > 0 ? 2 * cx - x : x);                                       // 오른쪽이면 꼬리 쪽을 좌우로 뒤집어 그린다
     c.globalAlpha = a;
     c.translate(cx, cy); c.scale(pop, pop); c.translate(-cx, -cy);
     const rad = h / 2;
     c.beginPath();                                                                      // 알약 모양 + 머리를 가리키는 꼬리
-    c.moveTo(bx + rad, by);
-    c.arcTo(bx + w, by, bx + w, by + h, rad);
-    c.arcTo(bx + w, by + h, bx, by + h, rad);
-    c.lineTo(bx + w - rad * 0.9, by + h);
-    c.lineTo(bx + w + r * 0.18, by + h + r * 0.42);                                     // 꼬리 끝
-    c.lineTo(bx + w - rad * 1.7, by + h);
-    c.arcTo(bx, by + h, bx, by, rad);
-    c.arcTo(bx, by, bx + w, by, rad);
+    c.moveTo(X(bx + rad), by);
+    c.arcTo(X(bx + w), by, X(bx + w), by + h, rad);
+    c.arcTo(X(bx + w), by + h, X(bx), by + h, rad);
+    c.lineTo(X(bx + w - rad * 0.9), by + h);
+    c.lineTo(X(bx + w + r * 0.18), by + h + r * 0.42);                                  // 꼬리 끝
+    c.lineTo(X(bx + w - rad * 1.7), by + h);
+    c.arcTo(X(bx), by + h, X(bx), by, rad);
+    c.arcTo(X(bx), by, X(bx + w), by, rad);
     c.closePath();
     c.fillStyle = '#fff'; c.fill();
     c.strokeStyle = INK; c.lineWidth = 2; c.lineJoin = 'round'; c.stroke();
