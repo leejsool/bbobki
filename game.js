@@ -25,13 +25,17 @@ function distToSeg(px, py, ax, ay, bx, by) {
 
 /** 괴물 혀가 닿는 범위(화면 폭 비율)와 끌어당기는 속도(화면 폭/초) */
 const HUNT_RANGE = 0.58;
-/** 벽이 슬금슬금 나오는 정도: 이 시간(초)이 지나면 시간 몫이 다 찬다 / 끝날 무렵 화면 폭의 몇 배까지 */
-const CREEP_SECONDS = 26;
-const CREEP_REACH = 0.13;
 const REEL = 0.40;
-/** 벽이 꼬리를 쫓을 때 남겨 두는 거리 / 덮칠 때 더 나오는 거리 (캐릭터 반지름의 몇 배) */
-const CHASE_GAP = 2.8;
-const LUNGE = [6.5, 10];
+/** 벽(앞니)의 자리(화면 폭 비율): 출발 직후 -> 마지막 한 명이 남을 무렵. 탈락이 진행되는 만큼 꾸준히 나온다 */
+const WALL_FROM = 0.03, WALL_TO = 0.40;
+/** 벽이 나오는 가장 빠른 속도 (화면 폭/초) - 한꺼번에 여럿이 탈락해도 쑥 튀어나오지 않게 */
+const WALL_SPEED = 0.025;
+/** 벽 일부가 튀어나와 무는 공격: 뻗는 거리(화면 폭 비율) / 굵기의 절반(반지름의 몇 배) / 예고 시간(초) */
+const STRIKE_REACH = [0.2, 0.3];
+const STRIKE_HALF = 1.35;
+const STRIKE_WARN = [1.0, 0.7];
+/** 부활 하트: 한 판에 나오는 개수 후보 (평균 2) */
+const REVIVES = [1, 2, 2, 2, 3];
 
 /** 뛰어넘을 수 있는 '낮은' 장애물. 벽과 해머는 못 넘는다. */
 const LOW = new Set(['spinner', 'ball', 'saw']);
@@ -452,14 +456,20 @@ class RaceGame {
     this.raceT = 0;                        // 출발하고 흐른 시간
     // 왼쪽 끝에서 다가오는 괴물. f 는 화면 폭에 대한 앞니(앞쪽 끝)의 위치 비율이라 창 크기가 바뀌어도 그대로다.
     this.maw = {
-      state: 'sleep',                      // sleep -> creep <-> warn -> snap / hunt
+      state: 'sleep',                      // sleep -> creep <-> warn -> strike(일부가 튀어나와 문다) / hunt(혀)
       f: -0.09, t: 0, cd: 0, hcd: 0, hold: 0,
       kind: '', prey: null, rage: 0, look: this.top + this.trackH / 2,
-      baseF: 0.03, peakF: 0.2, alarmX: -Infinity,
+      baseF: 0.03, alarmX: -Infinity, warnT: 1,
       full: 0, bite: false,                // 방금 한 입 물었다 (입이 차서 잠깐은 더 못 문다)
-      press: 0,                            // 압박 0~1: 한동안 아무도 탈락하지 않으면 꼬리 바로 뒤까지 따라붙는다
+      prog: 0,                             // 벽이 나온 정도 0~1 (탈락 진행을 천천히 따라간다)
       tongue: 0, attached: false,          // 혀가 뻗은 정도 0~1 / 먹잇감을 붙잡았나
+      lane: 0, reach: 0, ext: 0,           // 튀어나와 무는 줄(y) / 뻗을 거리(px) / 지금 뻗은 정도 0~1
     };
+    // 부활 하트: 탈락이 이만큼(비율) 진행될 때마다 하나씩 나온다
+    const nRev = pick(REVIVES);
+    this.reviveAt = Array.from({ length: nRev }, (_, i) => rnd(0.08, 0.5) * 0.6 + ((i + 0.5) / nRev) * 0.35).sort((a, b) => a - b);
+    this.hearts = [];                      // 트랙 위에 떠 있는 부활 하트
+    this.angels = [];                      // 내려오는 / 올라가는 천사
     this.mawX = this.camX + this.maw.f * this.W;
 
     const n = members.length;
@@ -511,6 +521,8 @@ class RaceGame {
         heldBy: null, flight: null,        // 들려 있다 / 던져져 날아가는 중
         actCd: rnd(8, 20),                 // 밟기·던지기 쿨다운
         fear: 0, cause: '', eaten: false,  // 괴물이 가까울수록 커지는 두려움 / 탈락 이유
+        shield: 0, angel: null,            // 부활 직후 잠깐 무적 / 데리고 내려오는 천사
+        slot: Math.random(), slotCd: rnd(2, 6),   // 무리 안에서 좋아하는 앞뒤 자리 (0 앞 ~ 1 뒤)
       };
     });
     this.runners.forEach((r) => { r.targetY = r.y; });
@@ -625,6 +637,9 @@ class RaceGame {
       }
     }
 
+    /* --- 부활 하트와 천사 --- */
+    this.stepRevive(dt, leadX);
+
     /* --- 장애물 움직임 (꼬리가 지나갈 때까지 남겨 둔다) --- */
     for (const o of this.obstacles) this.moveObstacle(o, dt, heat);
     const cullX = Math.min(this.camX, tailX) - 400;
@@ -633,7 +648,12 @@ class RaceGame {
 
     /* --- 달리기 --- */
     const baseSpeed = 250 + 70 * diff;
-    const band = this.W * 0.46;      // 무리가 벌어질 수 있는 폭
+    const band = this.W * 0.62;      // 무리가 벌어질 수 있는 폭 (화면이 가로로 긴 만큼 넓게 퍼진다)
+    // 무리가 퍼질 폭: 괴물 벽 앞에서 화면 오른쪽 끝 가까이까지
+    const span = this.W * clamp(0.8 - Math.max(this.maw.f, 0), 0.3, 0.72);
+    let meanX = 0, cnt = 0;
+    for (const R of this.runners) if (R.alive && !R.heldBy && !R.flight) { meanX += R.x; cnt++; }
+    meanX = cnt ? meanX / cnt : 0;
     const hitNow = [];
 
     for (const R of this.runners) {
@@ -664,7 +684,8 @@ class RaceGame {
         pull = R.fear * (dizzy ? 300 : 60);             // 기절하면 버티지 못하고 쑥쑥 끌려간다
         if (maw.attached && maw.prey === R) pull = Math.max(pull, this.W * REEL);   // 혀에 감겨 끌려온다
         // 경고를 듣고 도망친다. 알아채는 데 걸리는 시간은 그때그때 달라서, 굼뜨면 덮칠 때 잡힌다
-        if (R.x < maw.alarmX && !dizzy && !R.carry) {
+        const lane = this.striking() && this.inStrike(R, 1.2);     // 튀어나와 무는 줄에 서 있다
+        if ((R.x < maw.alarmX || lane) && !dizzy && !R.carry) {
           R.alarm += dt;
           if (R.alarm >= R.react) R.dash = Math.max(R.dash, 0.5);
         } else if (R.alarm > 0) {
@@ -738,7 +759,7 @@ class RaceGame {
       } else if (!dizzy && !R.carry) {
         R.dashCd -= dt;
         if (R.dashCd <= 0) {
-          const chance = (0.25 + lagRatio * 2.6) * dt;
+          const chance = (0.3 + lagRatio * 0.7) * dt;
           if (Math.random() < chance) {
             R.dash = rnd(0.45, 0.9);
             R.dashCd = rnd(1.8, 4.2);
@@ -767,13 +788,25 @@ class RaceGame {
       R.paceCd -= dt;
       if (R.paceCd <= 0) { R.paceCd = rnd(1.2, 3.5); R.paceTo = rnd(0.9, 1.1); }
       R.pace += (R.paceTo - R.pace) * Math.min(1, dt * 1.5);
+      // 무리 안에서 저마다 좋아하는 앞뒤 자리가 있다 (가끔 바꾼다) -> 가로로 넓게 퍼지고 순서도 계속 뒤바뀐다
+      R.slotCd -= dt;
+      if (R.slotCd <= 0) { R.slotCd = rnd(5, 10); R.slot = Math.random(); }
+      const steer = clamp((meanX + (0.5 - R.slot) * span - R.x) / (span * 0.4), -0.5, 0.5);
       const sp = baseSpeed * R.speed * R.pace
-        * (0.84 + lagRatio * 0.36)
+        * (1 + 0.7 * steer + 0.1 * lagRatio)
         * (R.dash > 0 ? 1.85 : 1)
         * (R.stun > 0 ? 0.35 : 1)
         * (dizzy ? 0.4 : 1)                       // 비틀거린다
         * (R.carry ? 0.6 : 1);                    // 들고 있으면 느리다
-      R.x += (sp - pull) * dt;
+      // 앞뒤로 너무 붙은 아이끼리는 서로 밀어낸다 -> 같은 줄에 뭉치지 않고 가로로 퍼진다
+      let sep = 0;
+      for (const O of this.runners) {
+        if (O === R || !O.alive || O.heldBy || O.flight) continue;
+        const ddx = R.x - O.x, ddy = Math.abs(R.y - O.y);
+        if (ddy > this.r * 2.6 || Math.abs(ddx) > this.r * 3.6) continue;
+        sep += (ddx > 0 ? 1 : ddx < 0 ? -1 : R.seq < O.seq ? 1 : -1) * (1 - Math.abs(ddx) / (this.r * 3.6)) * (1 - ddy / (this.r * 2.6));
+      }
+      R.x += (sp - pull + clamp(sep, -1.5, 1.5) * baseSpeed * 0.3) * dt;
       R.bob += dt * (7 + sp * 0.02);
       if (R.dash > 0 && Math.random() < 0.5) this.trail(R);
 
@@ -791,6 +824,16 @@ class RaceGame {
 
       // 들고 있는 아이는 머리 위에 얹혀 따라온다
       if (R.carry) { R.carry.x = R.x - this.r * 0.9 * this.windup(R); R.carry.y = R.y; }
+
+      if (R.shield > 0) { R.shield -= dt; continue; }            // 부활 직후에는 아무것도 못 건드린다
+
+      // 튀어나온 괴물 입에 걸리면 꿀꺽
+      if (maw.state === 'strike' && maw.ext > 0.3 && R.x - this.r * 0.4 < this.mawX + maw.reach * maw.ext
+          && Math.abs(R.y - maw.lane) < this.r * (STRIKE_HALF + 0.5)) {
+        R.cause = 'maw';
+        hitNow.push(R);
+        continue;
+      }
 
       // 괴물 입에 닿으면 꿀꺽
       if (maw.state !== 'sleep' && R.x - this.mawX < this.r * 0.5) {
@@ -841,13 +884,14 @@ class RaceGame {
     let nowLead = -Infinity;
     for (const R of this.runners) if (R.alive && R.x > nowLead) nowLead = R.x;
     this.dist = Math.max(this.dist, nowLead);
-    const want = nowLead - this.W * 0.58;
+    const want = nowLead - this.W * 0.8;                   // 선두를 오른쪽 끝 가까이 두어 무리가 넓게 퍼질 자리를 준다
     this.camX = lerp(this.camX, want, 1 - Math.pow(0.0015, dt));
 
     this.stepParticles(dt);
 
     /* --- 끝 --- */
-    if (this.alive <= 1 && this.phase === 'race') {
+    // 천사가 누구를 데리고 내려오는 중이면 끝내지 않는다 (마지막 한 명과 다시 겨룬다)
+    if (this.alive <= 1 && this.phase === 'race' && !this.angels.some((A) => !A.landed)) {
       this.winner = this.runners.find((r) => r.alive) || null;
       for (const R of this.runners) {                     // 공중에 멈춘 채 끝나지 않게
         R.carry = R.heldBy = R.flight = R.stomp = null;
@@ -877,7 +921,6 @@ class RaceGame {
     R.deadAt = this.time;
     this.alive--;
     this.lastElimAt = this.time;
-    this.maw.press = Math.max(0, this.maw.press - 0.3);   // 누가 탈락하면 벽이 한숨 돌린다
     this.order.unshift(R);
     if (R.cause === 'maw') {
       // 꿀꺽: 괴물 쪽으로 빨려 들어가며 작아진다 (그리는 쪽에서 처리)
@@ -891,6 +934,98 @@ class RaceGame {
     }
     if (this.alive === 3) this.sfx('final');      // 셋 남으면 긴장감
     if (this.opts.onEliminate) this.opts.onEliminate(R, this.alive, R.cause);
+  }
+
+  /* ===== 부활 ===== */
+
+  /**
+   * 부활 하트 (날개 달린 금빛 하트).
+   * 탈락이 정해진 만큼 진행되면 무리 앞쪽에 하나 띄운다. 누가 먹으면 천사가 내려와
+   * 탈락한 아이 하나를 무리 한가운데에 되살려 놓는다. 아무도 못 먹고 지나치면 조금 뒤 다시 띄운다.
+   */
+  stepRevive(dt, leadX) {
+    const r = this.r, n = this.runners.length;
+    const gone = n > 1 ? 1 - (this.alive - 1) / (n - 1) : 1;
+    const dead = this.runners.filter((R) => !R.alive && !R.angel);
+
+    // 띄우기
+    if (this.reviveAt.length && !this.hearts.length && gone >= this.reviveAt[0] && dead.length && this.alive >= 3 && leadX > -Infinity) {
+      this.reviveAt.shift();
+      const ys = this.runners.filter((R) => R.alive).map((R) => R.y);
+      const y = clamp(pick(ys) + rnd(-1, 1) * r * 2, this.top + r * 1.5, this.bot - r * 1.5);
+      this.hearts.push({ x: leadX + this.W * rnd(0.12, 0.2), y, t: 0 });
+      if (this.opts.onHeart) this.opts.onHeart(null);
+    }
+
+    for (const h of this.hearts) {
+      h.t += dt;
+      if (Math.random() < dt * 10) {                                    // 반짝이 가루
+        this.particles.push({ x: h.x + rnd(-r, r), y: h.y + rnd(-r, r) * 0.8, vx: rnd(-20, 20), vy: rnd(-60, -20),
+          life: rnd(0.4, 0.8), age: 0, hue: 48, r: rnd(1.5, 3), light: 75 });
+      }
+      for (const R of this.runners) {
+        if (!R.alive || R.heldBy || R.flight) continue;
+        if (Math.hypot(R.x - h.x, R.y - h.y) > r * 1.6) continue;
+        h.taken = true;
+        const D = this.runners.filter((O) => !O.alive && !O.angel);
+        if (D.length) this.sendAngel(pick(D), R);
+        this.burst(h.x, h.y, 48, 22);
+        this.rings.push({ x: h.x, y: h.y, r0: r * 0.6, age: 0, life: 0.5, hue: 48, grow: 5, thick: 5 });
+        break;
+      }
+      // 아무도 못 먹고 화면 뒤로 사라졌다: 조금 뒤 다시 띄운다
+      if (!h.taken && h.x < this.camX - r * 3) { h.taken = true; this.reviveAt.unshift(gone + 0.04); }
+    }
+    this.hearts = this.hearts.filter((h) => !h.taken);
+
+    // 천사: 하늘에서 내려와 아이를 내려놓고 다시 올라간다
+    for (const A of this.angels) {
+      A.t += dt;
+      const R = A.R;
+      if (!A.landed) {
+        R.x = this.camX + A.sx * this.W;                               // 화면 안 같은 자리에 내려온다
+        R.bob += dt * 3;
+        if (A.t >= A.T) { A.landed = true; A.t = 0; A.x = R.x; A.y = R.y; this.revive(R); }
+      }
+    }
+    this.angels = this.angels.filter((A) => !A.landed || A.t < 1.1);
+  }
+
+  /** 천사를 내려보낸다 (R: 되살릴 아이, by: 하트를 먹은 아이) */
+  sendAngel(R, by) {
+    const r = this.r;
+    // 상태를 깨끗이 비우고, 무리 한가운데쯤 빈 줄에 내려놓는다
+    Object.assign(R, {
+      carry: null, heldBy: null, flight: null, stomp: null, cel: null,
+      dash: 0, jump: 0, jumpPow: 1, punch: 0, hurt: 0, dizzy: 0, squash: 0, spin: 0, fear: 0,
+      kx: 0, ky: 0, vy: 0, stun: 0, alarm: 0, liftT: 0, cause: '', eaten: false, deadAt: -99,
+    });
+    let y = rnd(this.top + r * 2, this.bot - r * 2);
+    for (let k = 0; k < 8; k++) {                                       // 남들과 겹치지 않는 줄
+      const yy = rnd(this.top + r * 2, this.bot - r * 2);
+      if (!this.runners.some((O) => O.alive && Math.abs(O.y - yy) < r * 2)) { y = yy; break; }
+    }
+    R.y = R.targetY = y;
+    const A = { R, sx: rnd(0.52, 0.66), t: 0, T: 1.5, landed: false };
+    R.angel = A;
+    R.x = this.camX + A.sx * this.W;
+    this.angels.push(A);
+    this.sfx('heart');
+    if (this.opts.onHeart) this.opts.onHeart(by, R);
+  }
+
+  /** 천사가 내려놓은 아이가 다시 달린다 */
+  revive(R) {
+    R.angel = null;
+    R.alive = true;
+    R.shield = 2.2;                                      // 잠깐은 아무것도 못 건드린다
+    R.dash = 0.5;
+    this.alive++;
+    this.order = this.order.filter((O) => O !== R);
+    this.burst(R.x, R.y, 48, 26);
+    this.puff(R, 1.3);
+    this.sfx('revive');
+    if (this.opts.onRevive) this.opts.onRevive(R, this.alive);
   }
 
   /* ===== 괴물 ===== */
@@ -922,30 +1057,15 @@ class RaceGame {
     const h1 = clamp(heat, 0, 1);
     m.t += dt;
     if (m.full > 0) m.full -= dt;
-    if (m.bite) {                                       // 덮치다가 한 명 물었으면 거기서 멈춘다
-      m.bite = false;
-      if (m.state === 'snap') { m.state = 'creep'; m.t = 0; m.cd = rnd(2.4, 4) / (0.7 + 0.5 * heat); m.hcd = 0.8; }
-    }
-    // 벽(앞니)은 시간이 갈수록, 사람이 줄수록 조금씩 앞으로 나온다 -> 끝날 무렵엔 제법 가깝다
+    m.bite = false;
+    // 벽(앞니)은 탈락이 진행되는 만큼 꾸준히 나온다 -> 마지막 한 명이 남을 무렵 화면의 40%쯤.
+    // 한꺼번에 여럿이 탈락해도 천천히 따라가고, 부활해도 물러나지 않는다.
     const n = this.runners.length;
     const gone = n > 1 ? 1 - (this.alive - 1) / (n - 1) : 1;           // 0(시작) ~ 1(한 명 남음)
-    const prog = clamp(0.5 * (this.raceT / CREEP_SECONDS) + 0.5 * gone, 0, 1);
-    // 압박: 2초 넘게 아무도 탈락하지 않으면 차오른다. 다 차면 꼬리 바로 뒤까지 따라붙는다
-    if (m.state !== 'sleep') {
-      const quiet = this.time - this.lastElimAt;
-      m.press = clamp(m.press + (quiet > 1.5 ? dt / 3 : -dt / 8), 0, 1);
-    }
-    const chase = clamp(0.45 + 0.4 * prog + 0.5 * m.press, 0, 1);
-    let tailX = Infinity;                                              // 멀쩡히 달리는 아이 중 맨 뒤
-    for (const R of this.runners) {
-      if (R.alive && R.dizzy <= 0 && !R.heldBy && !R.flight && R.x < tailX) tailX = R.x;
-    }
-    const creepF = 0.025 + 0.03 * h1 + CREEP_REACH * prog;
-    const tailF = tailX < Infinity ? (tailX - this.camX - r * CHASE_GAP) / W : creepF;
-    m.baseF = clamp(Math.max(creepF, lerp(creepF, tailF, chase)), 0.02, 0.44);
-    m.peakF = m.baseF + (r * lerp(LUNGE[0], LUNGE[1], h1)) / W;
+    if (m.state !== 'sleep') m.prog = Math.min(1, m.prog + clamp(gone - m.prog, 0, (WALL_SPEED / (WALL_TO - WALL_FROM)) * dt));
+    m.baseF = lerp(WALL_FROM, WALL_TO, m.prog);
     m.alarmX = -Infinity;
-    // 평소에는 천천히 다가오고 천천히 물러난다 (덮칠 때만 빠르다)
+    // 벽은 천천히 다가오고 천천히 물러난다
     let target = m.baseF, advance = 0.1, retreat = m.f > m.baseF + 0.03 ? 0.12 : 0.05;
 
     switch (m.state) {
@@ -963,36 +1083,52 @@ class RaceGame {
         m.hcd -= dt; m.cd -= dt;
         const prey = m.hcd <= 0 ? this.findPrey() : null;
         if (prey) this.mawWarn('hunt', prey);
-        else if (m.cd <= 0) this.mawWarn('snap', null);
+        else if (m.cd <= 0) {
+          // 벽의 한 부분만 튀어나와 문다: 닿을 거리 안의 아이 하나를 골라 그 줄을 노린다 (벽에 가까울수록 잘 걸린다)
+          const reach = W * lerp(STRIKE_REACH[0], STRIKE_REACH[1], h1);
+          let pickR = null, best = -Infinity;
+          for (const R of this.runners) {
+            if (!R.alive || R.heldBy || R.flight || R.shield > 0) continue;
+            const d = R.x - this.mawX;
+            if (d < 0 || d > reach * 0.9) continue;
+            const score = Math.random() - d / reach;
+            if (score > best) { best = score; pickR = R; }
+          }
+          if (pickR) {
+            m.lane = clamp(pickR.y, this.top + r, this.bot - r); m.reach = reach; m.ext = 0;
+            m.warnT = lerp(STRIKE_WARN[0], STRIKE_WARN[1], h1);
+            this.mawWarn('strike', pickR);
+          } else {
+            m.cd = 0.5;                                    // 닿을 데 아무도 없다: 잠시 뒤 다시 본다
+          }
+        }
         break;
       }
 
       case 'warn': {
-        target = Math.max(-0.02, m.baseF - 0.035);        // 뒤로 웅크린다
-        retreat = 0.12;
-        this.shakeScreen(0.08, r * 0.08);
         if (m.kind === 'hunt') {
+          target = Math.max(-0.02, m.baseF - 0.035);      // 뒤로 웅크린다
+          retreat = 0.12;
+          this.shakeScreen(0.08, r * 0.08);
           const prey = this.findPrey();
           if (!prey) { m.state = 'creep'; m.t = 0; m.hcd = 0.8; break; }
           m.prey = prey;
-        } else {
-          m.alarmX = this.camX + m.peakF * W + r * 2;
         }
-        if (m.t >= (m.kind === 'hunt' ? 0.35 : 0.95)) {
+        if (m.t >= (m.kind === 'hunt' ? 0.35 : m.warnT)) {
           m.state = m.kind; m.t = 0; m.hold = 0; m.tongue = 0; m.attached = false;
-          this.shakeScreen(0.3, r * 0.3);
+          this.shakeScreen(m.kind === 'hunt' ? 0.3 : 0.18, r * (m.kind === 'hunt' ? 0.3 : 0.18));
+          if (m.kind === 'strike') this.sfx('chomp');
         }
         break;
       }
 
-      case 'snap':
-        target = m.peakF; advance = 1.0;
-        m.alarmX = this.camX + m.peakF * W + r * 2;
-        if (m.f >= m.peakF - 0.004) {
-          m.hold += dt;
-          if (m.hold >= 0.4) { m.state = 'creep'; m.t = 0; m.cd = rnd(2.4, 4) / (0.7 + 0.5 * heat); m.hcd = 0.8; }
-        }
+      case 'strike': {
+        // 확 뻗었다가(0.18초) 잠깐 머물고(0.22초) 천천히 거둬들인다(0.4초)
+        const T1 = 0.18, T2 = 0.4, T3 = 0.8;
+        m.ext = m.t < T1 ? 1 - Math.pow(1 - m.t / T1, 3) : m.t < T2 ? 1 : 1 - clamp((m.t - T2) / (T3 - T2), 0, 1);
+        if (m.t >= T3) { m.state = 'creep'; m.t = 0; m.ext = 0; m.cd = rnd(1.2, 2.4) / (0.7 + 0.5 * heat); m.hcd = 0.6; }
         break;
+      }
 
       case 'hunt': {
         // 혀를 쭉 뻗어 기절한 아이를 낚아채 입으로 끌고 온다. 깨어나면 뿌리치고 도망친다.
@@ -1018,12 +1154,13 @@ class RaceGame {
     this.mawX = this.camX + m.f * W;
 
     // 화를 낼수록 붉어진다
-    const angry = m.state === 'warn' || m.state === 'snap' || m.state === 'hunt';
+    const angry = (m.state === 'warn' && m.kind === 'hunt') || m.state === 'hunt';   // 무는 공격은 그 부분만 붉어진다
     m.rage += ((angry ? 1 : 0) - m.rage) * Math.min(1, dt * 6);
 
     // 눈동자는 가장 뒤처진(또는 노리는) 아이를 쫓는다
     let lookY = this.top + this.trackH / 2, rear = Infinity;
     if (m.state === 'hunt' && m.prey) lookY = m.prey.y;
+    else if (this.striking()) lookY = m.lane;
     else for (const R of this.runners) if (R.alive && R.x < rear) { rear = R.x; lookY = R.y; }
     m.look += (lookY - m.look) * Math.min(1, dt * 8);
 
@@ -1035,6 +1172,18 @@ class RaceGame {
         life: rnd(0.35, 0.7), age: 0, hue: rnd(270, 300), r: rnd(3, r * 0.5), light: 36,
       });
     }
+  }
+
+  /** 벽 일부가 튀어나와 무는 공격을 예고하거나 하는 중인가 */
+  striking() {
+    const m = this.maw;
+    return (m.state === 'warn' && m.kind === 'strike') || m.state === 'strike';
+  }
+
+  /** 이 아이가 무는 공격의 줄 안에 있나 (pad: 반지름 몇 배만큼 넉넉히 볼지) */
+  inStrike(R, pad) {
+    const m = this.maw, r = this.r;
+    return R.x < this.mawX + m.reach + r * pad && Math.abs(R.y - m.lane) < r * (STRIKE_HALF + 0.55 + pad * 0.6);
   }
 
   /** 으르렁: 곧 덮친다는 경고 */
@@ -1325,7 +1474,12 @@ class RaceGame {
   chooseY(R, baseSpeed) {
     const sp = baseSpeed * R.speed;
     const ahead = this.obstacles.filter((o) => o.x > R.x - 170 && o.x < R.x + 600);
-    if (!ahead.length) {
+    // 괴물이 튀어나올 줄 (예고를 알아챈 아이만 피한다. 굼뜨면 늦는다)
+    const m = this.maw;
+    const dodge = this.striking() && this.inStrike(R, 2) && (m.state === 'strike' || m.t > R.react);
+    // 부활 하트: 앞에 보이면 그쪽으로 간다
+    const heart = this.hearts.find((h) => h.x > R.x - this.r && h.x < R.x + 520);
+    if (!ahead.length && !dodge && !heart) {
       // 장애물이 없으면 살짝 배회
       return clamp(R.y + rnd(-1, 1) * this.trackH * 0.07, this.top + this.r, this.bot - this.r);
     }
@@ -1346,6 +1500,14 @@ class RaceGame {
       for (const O of crowd) {                         // 남들이 몰린 줄은 꺼린다 -> 한 방에 여럿이 쓸려 나가지 않는다
         const d = Math.abs(y - O.targetY);
         if (d < personal) cost += 0.42 * (1 - d / personal);
+      }
+      if (dodge) {
+        const d = Math.abs(y - m.lane), band = this.r * (STRIKE_HALF + 1.6);
+        if (d < band) cost += 4 * (1 - d / band) * (0.6 + 0.4 * R.skill);
+      }
+      if (heart) {
+        const d = Math.abs(y - heart.y);
+        if (d < this.trackH * 0.3) cost -= 0.9 * (1 - d / (this.trackH * 0.3));
       }
       cost += Math.abs(y - R.y) / this.trackH * 0.55;  // 멀리 움직이기 싫어함
       cost += (1 - R.skill) * Math.random() * 1.5;     // 실력 없으면 헷갈림
@@ -1742,6 +1904,9 @@ class RaceGame {
     /* 장애물 */
     for (const o of this.obstacles) this.drawObstacle(c, o);
 
+    /* 부활 하트 */
+    for (const h of this.hearts) this.drawHeart(c, h);
+
     /* 탈락자 잔상 */
     for (const R of this.runners) {
       if (R.alive) continue;
@@ -1773,6 +1938,7 @@ class RaceGame {
     const list = this.runners.filter((r) => r.alive).sort((a, b) => zOf(a) - zOf(b));
     for (const R of list) this.drawRunner(c, R, false);
     this.drawMaw(c);
+    for (const A of this.angels) this.drawAngel(c, A);
     this.drawLabels(c, list);
 
     /* 충격파 링 (도약·착지) */
@@ -1901,8 +2067,11 @@ class RaceGame {
       c.beginPath(); c.arc(tx, ty, r * (m.attached ? 0.95 : 0.55), 0, Math.PI * 2); c.fill(); c.stroke();
     }
 
-    // 경고 표지: 곧 덮친다
-    if (m.state === 'warn' && Math.sin(this.time * 20) > -0.2) {
+    // 벽의 한 부분이 튀어나와 문다 (예고: 그 부분만 달아오르고 느낌표)
+    if (this.striking()) this.drawStrike(c, fx, wave);
+
+    // 경고 표지: 곧 덮친다 (혀로 낚아채기 전)
+    if (m.state === 'warn' && m.kind === 'hunt' && Math.sin(this.time * 20) > -0.2) {
       const sx = Math.max(fx, 0) + r * 2.4, sy = this.top + this.trackH * 0.5, s = r * 1.5;
       c.fillStyle = '#ff3355';
       c.strokeStyle = '#fff'; c.lineWidth = 3;
@@ -1915,6 +2084,240 @@ class RaceGame {
       c.fillText('!', sx, sy + s * 0.18);
       c.textBaseline = 'alphabetic';
     }
+    c.restore();
+  }
+
+  /** 느낌표 표지 (빨간 세모 + 흰 !) */
+  drawAlert(c, sx, sy, s) {
+    c.fillStyle = '#ff3355';
+    c.strokeStyle = '#fff'; c.lineWidth = 3; c.lineJoin = 'round';
+    c.beginPath();
+    c.moveTo(sx, sy - s); c.lineTo(sx + s * 0.95, sy + s * 0.7); c.lineTo(sx - s * 0.95, sy + s * 0.7);
+    c.closePath(); c.fill(); c.stroke();
+    c.fillStyle = '#fff';
+    c.font = `900 ${Math.round(s * 1.1)}px Jua, Gothic A1, sans-serif`;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText('!', sx, sy + s * 0.18);
+    c.textBaseline = 'alphabetic';
+  }
+
+  /**
+   * 벽의 한 줄이 튀어나와 무는 공격.
+   * 예고: 그 줄의 벽만 주황-빨강으로 달아오르며 꿈틀대고, 앞에 느낌표, 바닥엔 닿을 거리까지 옅은 빨간 띠.
+   * 공격: 그 부분이 굵은 목처럼 쭉 뻗고, 끝의 입이 쩍 벌어졌다 닫힌다.
+   */
+  drawStrike(c, fx, wave) {
+    const m = this.maw, r = this.r;
+    const warn = m.state === 'warn';
+    const ly = m.lane, hh = r * STRIKE_HALF;
+    const k = warn ? clamp(m.t / m.warnT, 0, 1) : 1;                 // 예고가 무르익는 정도
+    const pulse = 0.5 + 0.5 * Math.sin(this.time * (10 + k * 14));
+
+    // 닿을 거리까지 바닥에 옅은 빨간 띠
+    if (warn) {
+      const g = c.createLinearGradient(fx, 0, fx + m.reach, 0);
+      g.addColorStop(0, `rgba(255,60,60,${0.1 + 0.16 * k * pulse})`);
+      g.addColorStop(1, 'rgba(255,60,60,0)');
+      c.fillStyle = g;
+      c.fillRect(fx, ly - hh, m.reach, hh * 2);
+    }
+
+    // 그 줄의 벽이 달아오른다
+    c.save();
+    c.beginPath();
+    c.moveTo(-40, ly - hh * 1.5);
+    for (let y = ly - hh * 1.5; y <= ly + hh * 1.5; y += 4) c.lineTo(fx + wave(y) + r * 0.3, y);
+    c.lineTo(-40, ly + hh * 1.5);
+    c.closePath();
+    const hot = c.createLinearGradient(fx - r * 6, 0, fx + r, 0);
+    hot.addColorStop(0, 'rgba(255,80,40,0)');
+    hot.addColorStop(1, `hsla(${lerp(28, 2, k)},100%,${52 + pulse * 10}%,${0.55 + 0.35 * k})`);
+    c.fillStyle = hot;
+    c.shadowColor = '#ff3b2f'; c.shadowBlur = 14 + 16 * pulse;
+    c.fill();
+    c.restore();
+
+    // 튀어나온 목과 머리 (예고 중에는 살짝 꿈틀거리며 비어져 나온다)
+    const ext = warn ? (0.03 + 0.03 * pulse) * k : m.ext;
+    const len = Math.max(r * 0.6, m.reach * ext);
+    const x0 = fx - r, tip = fx + len;
+    const hx = tip - hh * 0.9;                                          // 머리 중심
+    const body = c.createLinearGradient(x0, 0, tip, 0);
+    body.addColorStop(0, '#1a0410');
+    body.addColorStop(1, `hsl(${lerp(330, 356, k)},70%,${26 + 8 * pulse * (warn ? 1 : 0)}%)`);
+    c.fillStyle = body;
+    c.shadowColor = 'rgba(255,40,60,.9)'; c.shadowBlur = 12;
+    c.beginPath();                                                       // 목 (위아래가 꿈틀댄다)
+    const wig = (x) => Math.sin(x * 0.06 - this.time * 14) * r * 0.12;
+    c.moveTo(x0, ly - hh * 0.8);
+    for (let x = x0; x <= hx; x += 6) c.lineTo(x, ly - hh * 0.72 + wig(x));
+    for (let x = hx; x >= x0; x -= 6) c.lineTo(x, ly + hh * 0.72 - wig(x));
+    c.closePath(); c.fill();
+    c.beginPath(); c.ellipse(hx, ly, hh * 1.05, hh * 1.1, 0, 0, Math.PI * 2); c.fill();
+    c.shadowBlur = 0;
+
+    // 입: 뻗을수록 쩍 벌어진다
+    const open = warn ? 0.15 : Math.sin(Math.PI * clamp(m.t / 0.4, 0, 1)) * 0.9 + 0.1;
+    const mo = hh * 0.85 * open;
+    c.fillStyle = '#2a0006';
+    c.beginPath();
+    c.moveTo(hx - hh * 0.1, ly);
+    c.lineTo(tip + hh * 0.25, ly - mo); c.lineTo(tip + hh * 0.25, ly + mo);
+    c.closePath(); c.fill();
+    c.fillStyle = '#fff4e8'; c.strokeStyle = 'rgba(40,10,40,.6)'; c.lineWidth = 1.2;
+    for (let i = 0; i < 3; i++) {                                       // 윗니, 아랫니
+      const tx = hx + hh * (0.15 + i * 0.32);
+      for (const s of [-1, 1]) {
+        const ty = ly + s * (mo * (0.55 + i * 0.18) + hh * 0.08);
+        c.beginPath();
+        c.moveTo(tx - hh * 0.14, ty); c.lineTo(tx + hh * 0.14, ty); c.lineTo(tx, ty - s * hh * 0.42);
+        c.closePath(); c.fill(); c.stroke();
+      }
+    }
+    // 눈
+    c.fillStyle = `hsl(${lerp(50, 8, k)},100%,58%)`;
+    c.shadowColor = '#ffcc33'; c.shadowBlur = 10;
+    c.beginPath(); c.ellipse(hx - hh * 0.2, ly - hh * 0.62, hh * 0.26, hh * 0.2, 0, 0, Math.PI * 2); c.fill();
+    c.shadowBlur = 0;
+    c.fillStyle = '#1a0008';
+    c.beginPath(); c.ellipse(hx - hh * 0.12, ly - hh * 0.62, hh * 0.07, hh * 0.17, 0, 0, Math.PI * 2); c.fill();
+
+    // 느낌표 (깜빡이며 커진다)
+    if (warn && Math.sin(this.time * 20) > -0.3) {
+      this.drawAlert(c, Math.max(tip, 0) + r * 1.7, ly - r * 0.2, r * (1.05 + 0.3 * k));
+    }
+  }
+
+  /** 하트 모양 경로 (가운데 x,y / 크기 s) */
+  heartPath(c, x, y, s) {
+    c.beginPath();
+    c.moveTo(x, y + s * 0.9);
+    c.bezierCurveTo(x - s * 1.35, y + s * 0.05, x - s * 0.95, y - s * 1.0, x, y - s * 0.38);
+    c.bezierCurveTo(x + s * 0.95, y - s * 1.0, x + s * 1.35, y + s * 0.05, x, y + s * 0.9);
+    c.closePath();
+  }
+
+  /** 날개 한 쪽 (s: -1 왼쪽, 1 오른쪽 / flap: 펄럭이는 각도) */
+  drawWing(c, x, y, s, size, flap, fill) {
+    c.save();
+    c.translate(x, y); c.scale(s, 1); c.rotate(-0.25 - flap);
+    c.fillStyle = fill;
+    c.strokeStyle = 'rgba(150,170,210,.8)'; c.lineWidth = 1.2;
+    for (let i = 0; i < 4; i++) {                                       // 깃털 네 장 (안쪽이 길다)
+      c.beginPath();
+      c.ellipse(size * (0.35 + i * 0.22), -size * (0.12 + i * 0.1), size * (0.55 - i * 0.07), size * 0.2, -0.35 - i * 0.18, 0, Math.PI * 2);
+      c.fill(); c.stroke();
+    }
+    c.restore();
+  }
+
+  /** 부활 하트: 금빛 하트에 흰 날개, 둥실둥실 떠서 반짝인다 */
+  drawHeart(c, h) {
+    const r = this.r, x = h.x - this.camX;
+    if (x < -r * 3 || x > this.W + r * 3) return;
+    const y = h.y - r * 0.4 + Math.sin(h.t * 3) * r * 0.25, s = r * 0.85;
+    const glow = c.createRadialGradient(x, y, 1, x, y, r * 2.6);
+    glow.addColorStop(0, 'rgba(255,225,120,.55)');
+    glow.addColorStop(1, 'rgba(255,225,120,0)');
+    c.fillStyle = glow;
+    c.beginPath(); c.arc(x, y, r * 2.6, 0, Math.PI * 2); c.fill();
+    const flap = Math.sin(h.t * 9) * 0.35;
+    for (const sd of [-1, 1]) this.drawWing(c, x + sd * s * 0.7, y - s * 0.15, sd, s * 1.15, flap, '#ffffff');
+    const g = c.createLinearGradient(x - s, y - s, x + s, y + s);
+    g.addColorStop(0, '#fff3a6'); g.addColorStop(0.45, '#ffc824'); g.addColorStop(1, '#c98400');
+    this.heartPath(c, x, y, s);
+    c.fillStyle = g;
+    c.shadowColor = '#ffd84a'; c.shadowBlur = 14;
+    c.fill();
+    c.shadowBlur = 0;
+    c.strokeStyle = '#8a5a00'; c.lineWidth = 2; c.stroke();
+    c.fillStyle = 'rgba(255,255,255,.75)';                              // 반짝
+    c.beginPath(); c.ellipse(x - s * 0.42, y - s * 0.3, s * 0.18, s * 0.11, -0.6, 0, Math.PI * 2); c.fill();
+    // 금 테두리 장식 (작은 구슬)
+    c.fillStyle = '#fff6c8';
+    for (const [dx, dy] of [[0, 0.62], [-0.55, 0.05], [0.55, 0.05]]) {
+      c.beginPath(); c.arc(x + dx * s, y + dy * s, s * 0.09, 0, Math.PI * 2); c.fill();
+    }
+  }
+
+  /** 천사: 빛기둥을 타고 내려와 아이를 내려놓고, 다시 올라가며 사라진다 */
+  drawAngel(c, A) {
+    const r = this.r, R = A.R;
+    const x = (A.landed ? A.x : R.x) - this.camX;
+    const gy = A.landed ? A.y : R.y;                                    // 내려놓을 땅
+    let lift, alpha = 1;
+    if (!A.landed) {
+      const k = clamp(A.t / A.T, 0, 1), e = 1 - Math.pow(1 - k, 3);
+      lift = (1 - e) * (gy + r * 4);
+    } else {
+      const k = clamp(A.t / 1.1, 0, 1);
+      lift = k * k * (gy + r * 6);
+      alpha = 1 - k;
+    }
+    const kidY = -lift - r * 0.25;                                      // 아이를 들어 올린 만큼
+
+    c.save();
+    c.globalAlpha = alpha;
+    // 빛기둥
+    const beam = c.createLinearGradient(0, 0, 0, gy + r);
+    beam.addColorStop(0, 'rgba(255,240,170,0)');
+    beam.addColorStop(0.3, 'rgba(255,240,170,.28)');
+    beam.addColorStop(1, 'rgba(255,240,170,.12)');
+    c.fillStyle = beam;
+    c.beginPath();
+    c.moveTo(x - r * 1.2, -10); c.lineTo(x + r * 1.2, -10); c.lineTo(x + r * 2.2, gy + r); c.lineTo(x - r * 2.2, gy + r);
+    c.closePath(); c.fill();
+
+    // 데리고 내려오는 아이 (금빛으로 감싼다)
+    if (!A.landed) {
+      c.save();
+      c.translate(0, kidY);
+      const halo = c.createRadialGradient(x, gy - r * 0.6, 1, x, gy - r * 0.6, r * 2.2);
+      halo.addColorStop(0, 'rgba(255,230,140,.6)'); halo.addColorStop(1, 'rgba(255,230,140,0)');
+      c.fillStyle = halo;
+      c.beginPath(); c.arc(x, gy - r * 0.6, r * 2.2, 0, Math.PI * 2); c.fill();
+      this.drawRunner(c, R, false);
+      c.restore();
+    }
+
+    // 천사 (아이 머리 위에서 두 손으로 붙잡고 있다)
+    const ay = gy + kidY - r * 3.1;
+    const flap = Math.sin(this.time * 8) * 0.4;
+    for (const sd of [-1, 1]) this.drawWing(c, x + sd * r * 0.45, ay - r * 0.1, sd, r * 1.5, flap, '#f8fbff');
+    // 옷
+    const robe = c.createLinearGradient(x, ay - r * 0.6, x, ay + r * 1.3);
+    robe.addColorStop(0, '#ffffff'); robe.addColorStop(1, '#cfe0ff');
+    c.fillStyle = robe;
+    c.beginPath();
+    c.moveTo(x - r * 0.35, ay - r * 0.4); c.lineTo(x + r * 0.35, ay - r * 0.4);
+    c.quadraticCurveTo(x + r * 0.7, ay + r * 0.6, x + r * 0.75, ay + r * 1.25);
+    c.lineTo(x - r * 0.75, ay + r * 1.25);
+    c.quadraticCurveTo(x - r * 0.7, ay + r * 0.6, x - r * 0.35, ay - r * 0.4);
+    c.closePath(); c.fill();
+    c.strokeStyle = 'rgba(120,140,190,.6)'; c.lineWidth = 1.2; c.stroke();
+    c.strokeStyle = '#ffcf3d'; c.lineWidth = r * 0.12;                  // 금 허리띠
+    c.beginPath(); c.moveTo(x - r * 0.5, ay + r * 0.3); c.lineTo(x + r * 0.5, ay + r * 0.3); c.stroke();
+    // 두 팔: 아이 어깨를 잡는다
+    c.strokeStyle = '#ffe2c4'; c.lineWidth = r * 0.2; c.lineCap = 'round';
+    for (const sd of [-1, 1]) {
+      c.beginPath(); c.moveTo(x + sd * r * 0.4, ay - r * 0.1);
+      c.quadraticCurveTo(x + sd * r * 1.0, ay + r * 0.8, x + sd * r * 0.85, ay + r * 1.6); c.stroke();
+    }
+    // 얼굴 + 머리카락
+    c.fillStyle = '#ffe2c4';
+    c.beginPath(); c.arc(x, ay - r * 0.85, r * 0.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#ffd36b';
+    c.beginPath(); c.arc(x, ay - r * 1.0, r * 0.52, Math.PI * 1.05, Math.PI * 1.95); c.fill();
+    c.strokeStyle = '#4a3a2a'; c.lineWidth = Math.max(1.3, r * 0.08);   // 웃는 눈
+    for (const sd of [-1, 1]) {
+      c.beginPath(); c.arc(x + sd * r * 0.18, ay - r * 0.82, r * 0.1, Math.PI * 1.1, Math.PI * 1.9); c.stroke();
+    }
+    c.beginPath(); c.arc(x, ay - r * 0.68, r * 0.13, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
+    // 후광
+    c.strokeStyle = '#ffd84a'; c.lineWidth = r * 0.14;
+    c.shadowColor = '#ffe680'; c.shadowBlur = 12;
+    c.beginPath(); c.ellipse(x, ay - r * 1.55, r * 0.5, r * 0.15, 0, 0, Math.PI * 2); c.stroke();
+    c.shadowBlur = 0;
     c.restore();
   }
 
@@ -2427,6 +2830,14 @@ class RaceGame {
     } else if (dz) {
       const wob = Math.sin(this.time * 7 + R.bob) * 0.22 * Math.min(R.dizzy / 0.3, 1);
       c.translate(sx, y + r); c.rotate(wob); c.translate(-sx, -(y + r));
+    }
+
+    // 부활 직후: 금빛 보호막
+    if (!ghost && R.shield > 0) {
+      const a = Math.min(1, R.shield / 0.5) * (0.55 + 0.25 * Math.sin(this.time * 14));
+      c.strokeStyle = `rgba(255,215,90,${a})`; c.lineWidth = 3;
+      c.fillStyle = `rgba(255,235,150,${a * 0.25})`;
+      c.beginPath(); c.arc(sx, y + r * 0.3, r * 1.9, 0, Math.PI * 2); c.fill(); c.stroke();
     }
 
     // 대쉬 중이면 뒤로 빛줄기

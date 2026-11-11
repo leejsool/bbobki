@@ -20,7 +20,7 @@ const Sound = {
   GAP: {
     jump: 70, land: 90, out: 70, punch: 180, boom: 140, countdown: 120,
     stomp: 160, lift: 160, throw: 160, thud: 160, growl: 700, gulp: 120, slurp: 200,
-    mine: 150, blast: 110,
+    mine: 150, blast: 110, chomp: 200, heart: 300, revive: 300,
   },
 
   /* ---------- 준비 ---------- */
@@ -192,6 +192,25 @@ const Sound = {
     slurp() {
       this.hiss({ t: 0.16, gain: 0.5, f0: 3000, f1: 500, type: 'bandpass', q: 2 });
       this.tone({ type: 'sine', f0: 700, f1: 180, t: 0.2, gain: 0.34 });
+    },
+
+    /* 벽 일부가 튀어나와 덥석: 휙 + 딱 */
+    chomp() {
+      this.hiss({ t: 0.16, gain: 0.6, f0: 600, f1: 2600, type: 'bandpass', q: 1.2 });
+      this.tone({ type: 'square', f0: 180, f1: 70, t: 0.12, gain: 0.5, at: 0.13 });
+      this.hiss({ t: 0.06, gain: 0.8, f0: 3000, f1: 800, at: 0.14 });
+    },
+
+    /* 부활 하트를 먹었다: 반짝이는 하프 */
+    heart() {
+      [784, 988, 1175, 1568].forEach((f, i) => this.tone({ type: 'sine', f0: f, t: 0.35, gain: 0.28, at: i * 0.06 }));
+      this.hiss({ t: 0.5, gain: 0.12, f0: 3000, f1: 8000, type: 'bandpass', q: 0.7 });
+    },
+
+    /* 천사가 아이를 내려놓았다: 맑은 화음 */
+    revive() {
+      for (const f of [523, 659, 784]) this.tone({ type: 'triangle', f0: f, t: 0.8, gain: 0.26 });
+      this.tone({ type: 'sine', f0: 1047, f1: 1568, t: 0.6, gain: 0.2, at: 0.08 });
     },
 
     out() {

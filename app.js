@@ -28,6 +28,7 @@ let roster = null;        // { fetchedAt, grades:[...] }
 let selGrade = null;
 let selClass = null;
 let game = null;
+let strikeTold = false;    // 이번 판에 '괴물이 튀어나와 문다' 안내를 했나 (처음 한 번만 알린다)
 let hero = null;          // 당첨 화면에서 세레모니하는 우승자
 let busy = false;
 
@@ -225,6 +226,7 @@ function runGame(cls) {
   el.hudLap.textContent = '구간 1';
   el.killFeed.innerHTML = '';
   clearToast();
+  strikeTold = false;
   show('race');
 
   if (!game) {
@@ -269,7 +271,22 @@ function runGame(cls) {
       onMaw(kind, prey) {
         if (kind === 'wake') showToast('👹 왼쪽 끝에서 괴물이 깨어났습니다! 뒤처지면 먹힙니다!', 3200, true);
         else if (kind === 'hunt') showToast(`🩸 ${prey.name}${josa(prey.name, '이', '가')} 기절! 괴물이 노립니다!`, 2400, true);
-        else showToast('⚠️ 괴물이 으르렁… 왼쪽 끝에서 도망치세요!', 2400, true);
+        else if (kind === 'strike' && !strikeTold) {
+          strikeTold = true;
+          showToast('❗ 괴물 몸이 달아오르면 그 줄로 입이 튀어나옵니다! 비키세요!', 2600, true);
+        }
+      },
+      onHeart(by, R) {
+        if (!by) showToast('💛 날개 달린 부활 하트가 나타났습니다!', 2200);
+        else showToast(`👼 ${by.name}${josa(by.name, '이', '가')} 부활 하트를 먹었습니다! 천사가 ${R.name}${josa(R.name, '을', '를')} 데려옵니다!`, 2800, true);
+      },
+      onRevive(R, alive) {
+        el.hudAlive.textContent = alive;
+        const d = document.createElement('div');
+        d.textContent = `😇 ${R.name} 부활!`;
+        el.killFeed.appendChild(d);
+        setTimeout(() => d.remove(), 3000);
+        while (el.killFeed.children.length > 6) el.killFeed.firstChild.remove();
       },
       onWin(R, order) { showWin(R, order, cls); },
     });
