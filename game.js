@@ -119,6 +119,54 @@ function bend2(ax, ay, bx, by, l1, l2, hx, hy) {
      hl/hr 손 모양 ('thumb' 엄지척, 'L' 검지는 위·엄지는 몸 중심 쪽, 'point' 검지, 'glove' 흰 장갑),  prop 소품 ('shades', 'fedora')
      look 얼굴을 돌린 정도 (-1~1),  face 표정 ('smug' 메롱) */
 const TAU = Math.PI * 2;
+/* ---------- 굵기가 변하는 띠 (혀, 뱀 목) ----------
+   가운데 선의 점마다 굵기(w)를 주고, 그 선을 따라 띠 모양을 만든다. */
+/** 가운데 선의 점마다 옆으로 향하는 방향(nx,ny)을 채운다 (오른쪽으로 가는 선이면 아래쪽이 +) */
+function spine(pts) {
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(n - 1, i + 1)];
+    const dx = b.x - a.x, dy = b.y - a.y, d = Math.hypot(dx, dy) || 1;
+    pts[i].nx = -dy / d; pts[i].ny = dx / d;
+  }
+  return pts;
+}
+/** 가운데 선에서 굵기의 a배 ~ b배 사이를 띠로 잇는다 (-1 위쪽 가장자리, 1 아래쪽 가장자리) */
+function ribbon(c, P, a, b) {
+  c.beginPath();
+  for (let i = 0; i < P.length; i++) {
+    const p = P[i], X = p.x + p.nx * p.w * a, Y = p.y + p.ny * p.w * a;
+    if (i) c.lineTo(X, Y); else c.moveTo(X, Y);
+  }
+  for (let i = P.length - 1; i >= 0; i--) { const p = P[i]; c.lineTo(p.x + p.nx * p.w * b, p.y + p.ny * p.w * b); }
+  c.closePath();
+}
+/** 가운데 선에서 굵기의 a배만큼 비켜난 선 (s0~s1 구간만) */
+function rail(c, P, a, s0 = 0, s1 = 1) {
+  const n = P.length - 1;
+  c.beginPath();
+  for (let i = Math.round(s0 * n); i <= Math.round(s1 * n); i++) {
+    const p = P[i], X = p.x + p.nx * p.w * a, Y = p.y + p.ny * p.w * a;
+    if (i > Math.round(s0 * n)) c.lineTo(X, Y); else c.moveTo(X, Y);
+  }
+}
+/** 가운데 선의 s(0~1) 자리 */
+function spineAt(P, s) {
+  const f = clamp(s, 0, 1) * (P.length - 1), i = Math.min(P.length - 2, Math.floor(f)), k = f - i;
+  const a = P[i], b = P[i + 1];
+  return { x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), nx: lerp(a.nx, b.nx, k), ny: lerp(a.ny, b.ny, k), w: lerp(a.w, b.w, k) };
+}
+/** 네 갈래 반짝이 */
+function star4(c, x, y, s) {
+  c.beginPath();
+  c.moveTo(x, y - s);
+  c.quadraticCurveTo(x, y, x + s * 0.8, y);
+  c.quadraticCurveTo(x, y, x, y + s);
+  c.quadraticCurveTo(x, y, x - s * 0.8, y);
+  c.quadraticCurveTo(x, y, x, y - s);
+  c.fill();
+}
+
 const squashAt = (fr) => 0.45 * Math.max(0, 1 - Math.min(fr, 1 - fr) * 9);   // 뛰기 직전·착지 순간
 const smooth01 = (k) => { const c = clamp(k, 0, 1); return c * c * (3 - 2 * c); };
 
@@ -1971,118 +2019,453 @@ class RaceGame {
     c.restore();
   }
 
-  /** 왼쪽 끝에서 밀려오는 괴물. 어두운 몸통 + 이빨 + 번뜩이는 눈 */
+  /**
+   * 왼쪽 끝에서 밀려오는 괴물 "꿀꺽이".
+   * 비늘 덮인 어두운 몸통 + 잇몸에 박힌 두 줄 송곳니 + 늘어지는 침 + 깜빡이며 노려보는 파충류 눈.
+   * 기절한 아이를 노릴 때는 온몸이 붉어지고, 가운데 둥근 입이 벌어져 혀가 나온다.
+   */
   drawMaw(c) {
     const m = this.maw;
     if (!m || m.state === 'sleep' && m.f < -0.085) return;
-    const r = this.r, H = this.H;
+    const r = this.r, H = this.H, T = this.time;
     const fx = this.mawX - this.camX;                     // 앞니 끝선의 화면 x
     if (fx < -r * 4) return;
     const rage = m.rage;
-    const hue = lerp(275, 352, rage);
-    const wave = (y) => Math.sin(y * 0.05 + this.time * 3.2) * r * 0.35 + Math.sin(y * 0.021 - this.time * 2.1) * r * 0.6;
+    const hue = lerp(272, 348, rage);
+    const y0 = this.top + this.trackH * 0.5;              // 혀가 나오는 입의 높이
+    const gape = smooth01(rage);                          // 그 입이 벌어진 정도
+    // 벽의 앞선: 꿈틀대는 물결 + 입을 벌리면 입가가 앞으로 불룩 나온다
+    const wave = (y) => Math.sin(y * 0.05 + T * 3.2) * r * 0.35 + Math.sin(y * 0.021 - T * 2.1) * r * 0.6
+      + gape * r * 0.5 * Math.exp(-Math.pow((y - y0) / (r * 2.6), 2));
+    const edge = (y) => fx + wave(y);
 
     c.save();
+    c.lineJoin = 'round'; c.lineCap = 'round';
 
     // 앞쪽에 번지는 붉은 위험 구역
-    const pulse = m.state === 'warn' ? 0.5 + 0.5 * Math.sin(this.time * 18) : 1;
+    const pulse = m.state === 'warn' ? 0.5 + 0.5 * Math.sin(T * 18) : 1;
     const zoneW = r * (m.state === 'creep' ? 4.5 : 8);
     const dz = c.createLinearGradient(fx, 0, fx + zoneW, 0);
-    dz.addColorStop(0, `rgba(255,40,80,${(0.1 + 0.32 * rage) * pulse})`);
+    dz.addColorStop(0, `rgba(255,40,80,${(0.12 + 0.32 * rage) * pulse})`);
+    dz.addColorStop(0.45, `rgba(190,30,120,${(0.05 + 0.1 * rage) * pulse})`);
     dz.addColorStop(1, 'rgba(255,40,80,0)');
     c.fillStyle = dz;
     c.fillRect(Math.max(fx, 0), 0, zoneW + Math.min(fx, 0), H);
+    // 벽이 바닥에 드리우는 그늘 (벽이 바닥 위로 솟아 보인다)
+    const ao = c.createLinearGradient(fx - r, 0, fx + r * 2.6, 0);
+    ao.addColorStop(0, 'rgba(3,0,10,.6)'); ao.addColorStop(1, 'rgba(3,0,10,0)');
+    c.fillStyle = ao;
+    c.fillRect(fx - r, 0, r * 3.6, H);
 
-    // 몸통
-    const g = c.createLinearGradient(fx - r * 9, 0, fx + r * 0.5, 0);
-    g.addColorStop(0, '#03010a');
-    g.addColorStop(1, `hsl(${hue},62%,${17 + rage * 7}%)`);
-    c.beginPath();
-    c.moveTo(-40, -20);
-    for (let y = -20; y <= H + 20; y += 8) c.lineTo(fx + wave(y), y);
-    c.lineTo(-40, H + 20);
-    c.closePath();
+    /* --- 몸통 --- */
+    const body = new Path2D(), rim = new Path2D();
+    body.moveTo(-40, -20);
+    for (let y = -20; y <= H + 20; y += 8) {
+      const X = edge(y);
+      body.lineTo(X, y);
+      if (y === -20) rim.moveTo(X, y); else rim.lineTo(X, y);
+    }
+    body.lineTo(-40, H + 20);
+    body.closePath();
+    const g = c.createLinearGradient(fx - r * 10, 0, fx + r, 0);
+    g.addColorStop(0, '#04020b');
+    g.addColorStop(0.55, `hsl(${hue},58%,${8 + rage * 3}%)`);
+    g.addColorStop(0.86, `hsl(${hue},62%,${15 + rage * 6}%)`);
+    g.addColorStop(1, `hsl(${hue + 8},72%,${24 + rage * 8}%)`);
+    // 앞선 밖으로 번지는 빛 (화가 날수록 넓고 세다). 큰 모양에 shadowBlur 를 쓰면 느린 기기에서 무거워서 겹쳐 긋는다
+    for (const [w, a] of [[2.6, 0.07], [1.7, 0.1], [0.9, 0.16]]) {
+      c.strokeStyle = `hsla(${hue},100%,60%,${a * (0.55 + 1.1 * rage)})`;
+      c.lineWidth = r * w * (0.75 + 0.6 * rage);
+      c.stroke(rim);
+    }
     c.fillStyle = g;
-    c.shadowColor = `hsla(${hue},100%,58%,.9)`;
-    c.shadowBlur = 8 + rage * 26;
-    c.fill();
-    c.shadowBlur = 0;
+    c.fill(body);
 
-    // 이빨: 오물오물 씹는다. 화가 날수록 길고 뾰족하다
+    // 비늘: 앞선을 따라 겹겹이. 안쪽으로 갈수록 어둠에 묻힌다
+    // (앞줄부터 그리고 뒷줄이 그 위를 덮는다 -> 물고기 비늘처럼 둥근 끝만 차례로 드러난다)
+    const sy = r * 1.2, sr = sy * 0.58, sxs = sr * 0.94, cols = 10;
+    c.lineWidth = Math.max(1.2, r * 0.07);
+    for (let j = 0; j < cols; j++) {
+      const xo = r * 1.25 + j * sxs;
+      if (fx - xo + r * 2.5 < 0) break;                    // 여기부터는 화면 밖
+      const fade = Math.min(1, (cols - j) / 4);
+      const disc = new Path2D(), shine = new Path2D();
+      for (let y = -sy + (j % 2) * sy * 0.5; y < H + sy; y += sy) {
+        const cx = edge(y) - xo;
+        disc.moveTo(cx + sr, y); disc.arc(cx, y, sr, 0, Math.PI * 2);
+        shine.moveTo(cx + sr * 0.8 * Math.cos(-1.15), y + sr * 0.8 * Math.sin(-1.15));
+        shine.arc(cx, y, sr * 0.8, -1.15, 0.35);
+      }
+      c.save(); c.translate(r * 0.1, r * 0.04);            // 앞 비늘 위로 떨어지는 그늘
+      c.fillStyle = `rgba(2,0,8,${0.55 * fade})`; c.fill(disc);
+      c.restore();
+      c.fillStyle = `hsla(${hue},60%,${19 + rage * 6 - j * 1.25}%,${fade})`;
+      c.fill(disc);
+      c.strokeStyle = `hsla(${hue + 16},92%,${62 + rage * 8}%,${0.6 * fade * (1 - j / (cols + 3))})`;
+      c.stroke(shine);
+    }
+    // 옆구리의 빛점: 빛이 위에서 아래로 차례차례 흐른다 (화나면 붉게)
+    c.globalCompositeOperation = 'lighter';
+    const spotHue = lerp(172, 18, rage);
+    for (let i = 0; i * r * 2.1 < H + r; i++) {
+      const y = i * r * 2.1 + r * 0.5, x = edge(y) - r * (4.1 + 0.7 * Math.sin(i * 1.7));
+      if (x < -r) continue;
+      const a = 0.18 + 0.82 * Math.pow(0.5 + 0.5 * Math.sin(T * 3.4 - i * 0.85), 3);
+      const rr = r * (0.75 + 0.2 * Math.sin(i * 2.3));
+      const sg = c.createRadialGradient(x, y, 0, x, y, rr);
+      sg.addColorStop(0, `hsla(${spotHue},100%,80%,${0.95 * a})`);
+      sg.addColorStop(0.22, `hsla(${spotHue},100%,58%,${0.5 * a})`);
+      sg.addColorStop(1, `hsla(${spotHue},100%,50%,0)`);
+      c.fillStyle = sg;
+      c.fillRect(x - rr, y - rr, rr * 2, rr * 2);
+    }
+    c.globalCompositeOperation = 'source-over';
+    // 앞선 안쪽으로 배어드는 빛
+    c.save();
+    c.translate(-r * 0.42, 0);
+    c.strokeStyle = `hsla(${hue + 10},95%,62%,${0.2 + 0.22 * rage})`;
+    c.lineWidth = r * 0.84; c.lineCap = 'butt';
+    c.stroke(rim);
+    c.restore();
+
+    /* --- 뒷줄 이빨 (어둑한 속니) --- */
     const sp = r * 1.55;
-    c.lineJoin = 'round';
-    c.strokeStyle = 'rgba(40,10,40,.55)';
-    c.lineWidth = 1.5;
-    for (let i = 0; i * sp < H + 30; i++) {
-      const y = i * sp, bx = fx + wave(y);
-      const chomp = 0.5 + 0.5 * Math.sin(this.time * (5 + rage * 8) + i * 1.3);
-      const len = r * ((i % 2 ? 0.8 : 1.15) + rage * 0.55 + chomp * (0.3 + rage * 0.3));
-      if (bx + len < -2) continue;
+    const hole = (y) => gape * Math.exp(-Math.pow((y - y0) / (r * 1.9), 2));     // 벌린 입 가까이의 이빨은 비켜난다
+    const gulp = m.full > 0 ? Math.sin(Math.PI * clamp(m.full / 0.7, 0, 1)) : 0;   // 방금 삼켰다: 이를 꽉 문다
+    c.fillStyle = `hsl(${lerp(262, 335, rage)},24%,${58 + rage * 6}%)`;
+    c.strokeStyle = 'rgba(20,5,30,.65)'; c.lineWidth = 1.2;
+    for (let i = -1; i * sp < H + sp; i++) {
+      const y = (i + 0.5) * sp, bx = edge(y) - r * 0.1;
+      const len = r * (0.66 + 0.25 * rage + 0.2 * Math.sin(T * 4 + i * 2.1) + gulp * 0.3) * (1 - hole(y));
+      if (bx + len < -2 || len < r * 0.12) continue;
       c.beginPath();
-      c.moveTo(bx - 3, y - sp * 0.44);
-      c.lineTo(bx + len, y + Math.sin(this.time * 9 + i) * r * 0.06);
-      c.lineTo(bx - 3, y + sp * 0.44);
-      c.closePath();
-      c.fillStyle = rage > 0.5 ? '#fff4e8' : '#efe6cf';
-      c.fill(); c.stroke();
+      c.moveTo(bx, y - sp * 0.27);
+      c.quadraticCurveTo(bx + len * 0.6, y - sp * 0.12, bx + len, y);
+      c.quadraticCurveTo(bx + len * 0.6, y + sp * 0.12, bx, y + sp * 0.27);
+      c.closePath(); c.fill(); c.stroke();
     }
 
-    // 눈 (노려보는 아이를 따라간다)
-    const er = r * 1.05;
-    for (const ey of [this.top + this.trackH * 0.27, this.top + this.trackH * 0.73]) {
-      const ex = fx - r * 0.5 + wave(ey);
-      if (ex + er * 1.4 < 0) continue;
-      c.shadowColor = `hsl(${lerp(48, 0, rage)},100%,55%)`;
-      c.shadowBlur = 12 + rage * 14;
-      c.fillStyle = `hsl(${lerp(50, 2, rage)},100%,${58 - rage * 6}%)`;
-      c.beginPath(); c.ellipse(ex, ey, er * 0.9, er * 1.1, 0, 0, Math.PI * 2); c.fill();
-      c.shadowBlur = 0;
-      const look = clamp((m.look - ey) / this.trackH, -1, 1);
-      c.fillStyle = '#1a0008';
-      c.beginPath(); c.ellipse(ex + er * 0.3, ey + look * er * 0.4, er * 0.17, er * 0.82, 0, 0, Math.PI * 2); c.fill();
-      c.strokeStyle = `hsl(${hue},70%,10%)`;               // 성난 눈썹
-      c.lineWidth = r * 0.38; c.lineCap = 'round';
+    /* --- 잇몸 --- */
+    const gumHue = lerp(326, 348, rage);
+    c.save();
+    c.translate(-r * 0.4, 0);
+    c.strokeStyle = `hsl(${gumHue},62%,${15 + rage * 5}%)`; c.lineWidth = r * 1.0; c.stroke(rim);
+    c.translate(r * 0.2, 0);
+    c.strokeStyle = `hsl(${gumHue + 4},66%,${28 + rage * 7}%)`; c.lineWidth = r * 0.5; c.stroke(rim);
+    c.restore();
+
+    /* --- 앞줄 송곳니: 오물오물 씹는다. 화가 날수록 길어지고, 끝은 가운데 쪽으로 휜다 --- */
+    const tg = c.createLinearGradient(fx - r, 0, fx + r * 2.6, 0);
+    tg.addColorStop(0, '#d2bb90'); tg.addColorStop(0.4, '#f5ead2'); tg.addColorStop(1, '#ffffff');
+    const VAR = [1.15, 0.82, 1.0, 0.72, 1.22, 0.88];
+    const fangs = [];
+    for (let i = 0; i * sp < H + 30; i++) {
+      const y = i * sp, bx = edge(y), hl = hole(y);
+      const chomp = 0.5 + 0.5 * Math.sin(T * (5 + rage * 8) + i * 1.3);
+      const len = r * (VAR[i % 6] + rage * 0.55 + chomp * (0.3 + rage * 0.3) + gulp * 0.45) * (1 - 0.88 * hl);
+      if (bx + len < -2) continue;
+      const w = sp * 0.42 * (1 - 0.45 * hl), b0 = bx - r * 0.18;
+      const bend = clamp((y0 - y) / (H * 0.5), -1, 1) * len * 0.2 + Math.sin(T * 9 + i) * r * 0.05;
+      const tx = bx + len, ty = y + bend;
+      fangs.push([bx, y, w, tx, ty, i, hl]);
+      if (len < r * 0.2) continue;
       c.beginPath();
-      c.moveTo(ex - er * 1.1, ey - er * 1.45);
-      c.lineTo(ex + er * 1.0, ey - er * (0.75 - rage * 0.2));
+      c.moveTo(b0, y - w);
+      c.quadraticCurveTo(bx + len * 0.55, y - w * 0.7 + bend * 0.25, tx, ty);
+      c.quadraticCurveTo(bx + len * 0.5, y + w * 0.85 + bend * 0.25, b0, y + w);
+      c.closePath();
+      c.fillStyle = tg; c.fill();
+      c.strokeStyle = 'rgba(40,10,40,.62)'; c.lineWidth = 1.5; c.stroke();
+      c.beginPath();                                       // 아래쪽 절반의 그늘
+      c.moveTo(b0, y + w * 0.2);
+      c.quadraticCurveTo(bx + len * 0.5, y + w * 0.22 + bend * 0.55, tx, ty);
+      c.quadraticCurveTo(bx + len * 0.5, y + w * 0.85 + bend * 0.25, b0, y + w);
+      c.closePath();
+      c.fillStyle = 'rgba(112,70,132,.3)'; c.fill();
+      c.strokeStyle = 'rgba(255,255,255,.8)'; c.lineWidth = Math.max(1, r * 0.06);   // 윤기
+      c.beginPath();
+      c.moveTo(bx + len * 0.14, y - w * 0.48);
+      c.quadraticCurveTo(bx + len * 0.45, y - w * 0.4 + bend * 0.3, bx + len * 0.74, y - w * 0.1 + bend * 0.72);
       c.stroke();
     }
+    // 이뿌리를 덮는 잇몸 둔덕 (촉촉한 윤기)
+    for (const [bx, y, w, , , , hl] of fangs) {
+      if (hl > 0.7) continue;
+      c.fillStyle = `hsl(${gumHue + 6},68%,${34 + rage * 8}%)`;
+      c.beginPath(); c.ellipse(bx - r * 0.2, y, r * 0.3, w * 1.12, 0, 0, Math.PI * 2); c.fill();
+      c.strokeStyle = 'rgba(255,170,205,.5)'; c.lineWidth = Math.max(1, r * 0.06);
+      c.beginPath(); c.ellipse(bx - r * 0.2, y, r * 0.18, w * 0.75, 0, Math.PI * 1.1, Math.PI * 1.6); c.stroke();
+    }
+    // 침: 송곳니 끝에서 길게 늘어졌다가 뚝 떨어진다
+    for (const [, , , tx, ty, i, hl] of fangs) {
+      if (i % 3 !== 1 || hl > 0.3 || tx < 0) continue;
+      const p = (T * 0.42 + i * 0.37) % 1;
+      const grow = Math.min(1, p / 0.62), fall = Math.max(0, (p - 0.62) / 0.38);
+      const L = r * (0.25 + 1.15 * grow * grow) * (1 - Math.min(1, fall * 2.5));
+      const dx = tx - r * 0.12;
+      c.strokeStyle = 'rgba(196,255,226,.5)'; c.lineWidth = Math.max(1.2, r * 0.07);
+      c.beginPath(); c.moveTo(dx, ty + 1); c.lineTo(dx, ty + L); c.stroke();
+      const by = ty + r * (0.25 + 1.15 * grow * grow) + fall * fall * r * 3.2, br = r * (0.06 + 0.07 * grow);
+      c.fillStyle = `rgba(196,255,226,${0.7 * (1 - fall)})`;
+      c.beginPath();
+      c.moveTo(dx, by - br * 2.2); c.quadraticCurveTo(dx + br * 1.3, by, dx, by + br);
+      c.quadraticCurveTo(dx - br * 1.3, by, dx, by - br * 2.2);
+      c.fill();
+      c.fillStyle = `rgba(255,255,255,${0.8 * (1 - fall)})`;
+      c.beginPath(); c.arc(dx - br * 0.3, by - br * 0.1, br * 0.3, 0, Math.PI * 2); c.fill();
+    }
+
+    /* --- 혀가 나오는 입: 화가 나면 둥글게 벌어지고, 테두리에 잔니가 돈다 --- */
+    let mx = fx - r * 0.3;
+    if (gape > 0.03) {
+      const rx = r * (0.4 + 0.95 * gape), ry = r * (0.3 + 1.5 * gape);
+      mx = edge(y0) - rx - r * 0.12;
+      c.beginPath(); c.ellipse(mx, y0, rx + r * 0.32, ry + r * 0.32, 0, 0, Math.PI * 2);
+      c.fillStyle = `hsl(${gumHue + 4},64%,29%)`; c.fill();
+      c.strokeStyle = `hsl(${gumHue},70%,11%)`; c.lineWidth = r * 0.1; c.stroke();
+      c.strokeStyle = 'rgba(255,165,200,.55)'; c.lineWidth = r * 0.08;
+      c.beginPath(); c.ellipse(mx, y0, rx + r * 0.2, ry + r * 0.2, 0, Math.PI * 1.08, Math.PI * 1.62); c.stroke();
+      const cg = c.createRadialGradient(mx - rx * 0.25, y0, 0, mx, y0, Math.max(rx, ry));
+      cg.addColorStop(0, '#040005'); cg.addColorStop(0.55, '#290013'); cg.addColorStop(1, '#84123a');
+      c.beginPath(); c.ellipse(mx, y0, rx, ry, 0, 0, Math.PI * 2);
+      c.fillStyle = cg; c.fill();
+      // 목구멍 깊은 곳의 불빛
+      c.globalCompositeOperation = 'lighter';
+      const eg = c.createRadialGradient(mx - rx * 0.3, y0, 0, mx - rx * 0.3, y0, ry * 0.8);
+      eg.addColorStop(0, `rgba(255,110,60,${0.35 + 0.2 * Math.sin(T * 9)})`); eg.addColorStop(1, 'rgba(255,60,60,0)');
+      c.beginPath(); c.ellipse(mx, y0, rx, ry, 0, 0, Math.PI * 2);
+      c.fillStyle = eg; c.fill();
+      c.globalCompositeOperation = 'source-over';
+      // 테두리의 잔니
+      c.fillStyle = '#f7ecd6'; c.strokeStyle = 'rgba(40,10,40,.6)'; c.lineWidth = 1.2;
+      const n = 12;
+      for (let j = 0; j < n; j++) {
+        const a = ((j + 0.5) / n) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+        if (ca > 0.7) continue;                             // 혀가 지나는 자리
+        const ox = mx + ca * rx, oy = y0 + sa * ry;
+        const tl = Math.min(rx, ry) * 0.5 * (0.8 + 0.2 * Math.sin(T * 12 + j * 2));
+        const tw = r * 0.17;
+        c.beginPath();
+        c.moveTo(ox - sa * tw, oy + ca * tw); c.lineTo(ox + sa * tw, oy - ca * tw);
+        c.lineTo(ox - ca * tl, oy - sa * tl);
+        c.closePath(); c.fill(); c.stroke();
+      }
+    }
+
+    /* --- 눈 (노려보는 아이를 따라간다. 벽이 얕을 때는 앞선 가까이, 많이 나오면 깊숙이 자리 잡는다) --- */
+    const er = r * 1.12;
+    [this.top + this.trackH * 0.27, this.top + this.trackH * 0.73].forEach((ey, i) => {
+      const ex = Math.max(edge(ey) - r * 2.5, Math.min(edge(ey) - r * 0.75, r * 1.0));
+      if (ex + er * 1.6 < 0) return;
+      const bl = (T + i * 0.07 + 1.3) % 4.3;                   // 가끔 깜빡인다
+      const blink = bl < 0.16 ? Math.sin((Math.PI * bl) / 0.16) : 0;
+      this.drawMawEye(c, ex, ey, er, hue, rage, clamp((m.look - ey) / this.trackH, -1, 1), blink);
+    });
 
     // 혀: 기절한 아이를 낚아채 입으로 끌고 온다
-    if (m.state === 'hunt' && m.prey && m.prey.alive) {
-      const P = m.prey;
-      const x0 = fx - r * 0.3, y0 = this.top + this.trackH * 0.5;
-      const px = P.x - this.camX, py = P.y - this.heightOf(P);
-      const k = 1 - Math.pow(1 - m.tongue, 3);                       // 확 뻗는다
-      const tx = lerp(x0, px, k), ty = lerp(y0, py, k);
-      const dx = tx - x0, dy = ty - y0, len = Math.hypot(dx, dy) || 1;
-      const wob = Math.sin(this.time * 22) * r * (m.attached ? 0.25 : 0.7);
-      const cx = (x0 + tx) / 2 - (dy / len) * (wob + r * 0.4), cy = (y0 + ty) / 2 + (dx / len) * (wob + r * 0.4);
-      c.lineCap = 'round';
-      for (const [col, w] of [['#b0204f', r * 0.78], ['#ff4f86', r * 0.58], ['#ff9fc0', r * 0.16]]) {
-        c.strokeStyle = col; c.lineWidth = w;
-        c.beginPath(); c.moveTo(x0, y0); c.quadraticCurveTo(cx, cy, tx, ty); c.stroke();
-      }
-      c.fillStyle = '#ff4f86'; c.strokeStyle = '#b0204f'; c.lineWidth = 2;
-      c.beginPath(); c.arc(tx, ty, r * (m.attached ? 0.95 : 0.55), 0, Math.PI * 2); c.fill(); c.stroke();
-    }
+    if (m.state === 'hunt' && m.prey && m.prey.alive) this.drawTongue(c, mx, y0);
 
     // 벽의 한 부분이 튀어나와 문다 (예고: 그 부분만 달아오르고 느낌표)
     if (this.striking()) this.drawStrike(c, fx, wave);
 
     // 경고 표지: 곧 덮친다 (혀로 낚아채기 전)
-    if (m.state === 'warn' && m.kind === 'hunt' && Math.sin(this.time * 20) > -0.2) {
-      const sx = Math.max(fx, 0) + r * 2.4, sy = this.top + this.trackH * 0.5, s = r * 1.5;
-      c.fillStyle = '#ff3355';
-      c.strokeStyle = '#fff'; c.lineWidth = 3;
+    if (m.state === 'warn' && m.kind === 'hunt' && Math.sin(T * 20) > -0.2) {
+      this.drawAlert(c, Math.max(fx, 0) + r * 2.8, y0, r * 1.5);
+    }
+    c.restore();
+  }
+
+  /** 괴물의 눈: 불타는 홍채 + 세로로 찢어진 동공 + 성난 눈꺼풀 (look -1~1 위아래, blink 0~1 감은 정도) */
+  drawMawEye(c, ex, ey, er, hue, rage, look, blink) {
+    const T = this.time, r = this.r;
+    const eh = lerp(48, 4, rage);                                   // 화나면 노랑 -> 빨강
+    c.save();
+    c.translate(ex, ey);
+    // 눈구덩이의 그늘
+    const so = c.createRadialGradient(0, 0, er * 0.6, 0, 0, er * 1.9);
+    so.addColorStop(0, 'rgba(0,0,0,.75)'); so.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = so;
+    c.beginPath(); c.arc(0, 0, er * 1.9, 0, Math.PI * 2); c.fill();
+    // 눈에서 번지는 빛
+    c.globalCompositeOperation = 'lighter';
+    const gl = c.createRadialGradient(0, 0, er * 0.5, 0, 0, er * 2.6);
+    gl.addColorStop(0, `hsla(${eh},100%,55%,${(0.34 + 0.25 * rage) * (1 - blink)})`); gl.addColorStop(1, `hsla(${eh},100%,50%,0)`);
+    c.fillStyle = gl;
+    c.beginPath(); c.arc(0, 0, er * 2.6, 0, Math.PI * 2); c.fill();
+    c.globalCompositeOperation = 'source-over';
+
+    const ball = new Path2D();
+    ball.ellipse(0, 0, er * 0.94, er * 1.14, 0, 0, Math.PI * 2);
+    const px = er * 0.26, py = look * er * 0.4;                     // 동공 자리
+    const ig = c.createRadialGradient(px, py, er * 0.05, 0, 0, er * 1.15);
+    ig.addColorStop(0, `hsl(${eh + 10},100%,${76 - rage * 6}%)`);
+    ig.addColorStop(0.4, `hsl(${eh},100%,${56 - rage * 4}%)`);
+    ig.addColorStop(0.8, `hsl(${eh - 16},96%,${38 - rage * 4}%)`);
+    ig.addColorStop(1, `hsl(${eh - 24},92%,18%)`);
+    c.fillStyle = ig;
+    c.fill(ball);
+    c.save();
+    c.clip(ball);
+    // 홍채 결
+    c.strokeStyle = `hsla(${eh - 28},100%,22%,.34)`; c.lineWidth = Math.max(1, er * 0.045);
+    c.beginPath();
+    for (let j = 0; j < 20; j++) {
+      const a = (j / 20) * Math.PI * 2 + 0.1;
+      c.moveTo(px + Math.cos(a) * er * 0.24, py + Math.sin(a) * er * 0.42);
+      c.lineTo(px + Math.cos(a) * er * 1.3, py + Math.sin(a) * er * 1.3);
+    }
+    c.stroke();
+    // 동공: 세로로 찢어졌다. 화가 나면 바늘처럼 가늘어진다
+    const ph = er * 0.9, pw = er * lerp(0.24, 0.1, rage) * (1 + 0.14 * Math.sin(T * 2.7));
+    c.beginPath();
+    c.moveTo(px, py - ph);
+    c.quadraticCurveTo(px + pw * 2, py, px, py + ph);
+    c.quadraticCurveTo(px - pw * 2, py, px, py - ph);
+    c.fillStyle = '#10000a'; c.fill();
+    c.strokeStyle = `hsla(${eh + 14},100%,84%,.55)`; c.lineWidth = Math.max(1, er * 0.04); c.stroke();
+    // 반짝임
+    c.fillStyle = 'rgba(255,255,255,.92)';
+    c.beginPath(); c.ellipse(-er * 0.34, -er * 0.46, er * 0.2, er * 0.28, -0.5, 0, Math.PI * 2); c.fill();
+    c.fillStyle = 'rgba(255,255,255,.5)';
+    c.beginPath(); c.arc(er * 0.5, er * 0.56, er * 0.09, 0, Math.PI * 2); c.fill();
+    // 윗눈꺼풀이 드리우는 그늘
+    const sh = c.createLinearGradient(0, -er * 1.1, 0, er * 0.2);
+    sh.addColorStop(0, 'rgba(20,0,10,.75)'); sh.addColorStop(1, 'rgba(20,0,10,0)');
+    c.fillStyle = sh; c.fillRect(-er, -er * 1.2, er * 2, er * 1.4);
+    // 눈꺼풀: 앞쪽(오른쪽)이 낮게 내려와 사납다. 깜빡일 때 닫힌다
+    const lidL = -er * 1.05 + blink * er * 2.0, lidR = -er * (0.5 - rage * 0.22) + blink * er * 1.5;
+    const lowL = er * 1.1 - blink * er * 0.2, lowR = er * (0.82 - rage * 0.2) - blink * er * 0.1;
+    c.fillStyle = `hsl(${hue},58%,${11 + rage * 4}%)`;
+    c.beginPath();
+    c.moveTo(-er * 2, -er * 2); c.lineTo(er * 2, -er * 2); c.lineTo(er * 2, lidR); c.lineTo(-er * 2, lidL);
+    c.closePath(); c.fill();
+    c.beginPath();
+    c.moveTo(-er * 2, er * 2); c.lineTo(er * 2, er * 2); c.lineTo(er * 2, lowR); c.lineTo(-er * 2, lowL);
+    c.closePath(); c.fill();
+    c.strokeStyle = `hsla(${hue + 16},90%,64%,.7)`; c.lineWidth = Math.max(1.2, er * 0.06);
+    c.beginPath(); c.moveTo(-er * 2, lidL); c.lineTo(er * 2, lidR); c.stroke();
+    c.restore();
+    c.strokeStyle = `hsl(${hue},70%,6%)`; c.lineWidth = r * 0.14;
+    c.stroke(ball);
+
+    // 눈두덩: 앞으로 갈수록 가늘어지는 뿔 같은 눈썹
+    const tipY = -er * (0.34 - rage * 0.26);                         // 앞쪽 끝 (화나면 더 내리깐다)
+    const brow = new Path2D();
+    brow.moveTo(-er * 1.62, -er * 0.62);
+    brow.bezierCurveTo(-er * 1.25, -er * 1.75, er * 0.1, -er * 1.98, er * 0.82, -er * 1.3);
+    brow.quadraticCurveTo(er * 1.3, -er * 0.95, er * 1.42, tipY);
+    brow.quadraticCurveTo(er * 1.0, -er * 0.98, er * 0.42, -er * 1.2);
+    brow.bezierCurveTo(-er * 0.3, -er * 1.48, -er * 1.05, -er * 1.3, -er * 1.62, -er * 0.62);
+    brow.closePath();
+    // 눈두덩 위의 작은 뿔 셋 (눈두덩 뒤에 뿌리가 묻힌다)
+    c.fillStyle = `hsl(${hue},50%,${20 + rage * 6}%)`; c.strokeStyle = `hsl(${hue},70%,5%)`; c.lineWidth = r * 0.06;
+    for (const [hx, hy, hl, ha] of [[-0.95, -1.4, 0.62, -2.2], [-0.2, -1.72, 0.74, -1.75], [0.6, -1.36, 0.56, -1.2]]) {
+      const cs = Math.cos(ha), sn = Math.sin(ha), wd = er * 0.2;
       c.beginPath();
-      c.moveTo(sx, sy - s); c.lineTo(sx + s * 0.95, sy + s * 0.7); c.lineTo(sx - s * 0.95, sy + s * 0.7);
+      c.moveTo(hx * er - sn * wd, hy * er + cs * wd);
+      c.quadraticCurveTo(hx * er + cs * hl * er * 0.6 - sn * wd * 0.2, hy * er + sn * hl * er * 0.6 + cs * wd * 0.2, hx * er + cs * hl * er, hy * er + sn * hl * er);
+      c.quadraticCurveTo(hx * er + cs * hl * er * 0.5 + sn * wd * 0.9, hy * er + sn * hl * er * 0.5 - cs * wd * 0.9, hx * er + sn * wd, hy * er - cs * wd);
       c.closePath(); c.fill(); c.stroke();
-      c.fillStyle = '#fff';
-      c.font = `900 ${Math.round(s * 1.1)}px Jua, Gothic A1, sans-serif`;
-      c.textAlign = 'center'; c.textBaseline = 'middle';
-      c.fillText('!', sx, sy + s * 0.18);
-      c.textBaseline = 'alphabetic';
+    }
+    c.fillStyle = `hsl(${hue},62%,${8 + rage * 3}%)`; c.fill(brow);
+    c.strokeStyle = `hsl(${hue},70%,5%)`; c.lineWidth = r * 0.08; c.stroke(brow);
+    c.strokeStyle = `hsla(${hue + 16},92%,66%,.7)`; c.lineWidth = Math.max(1.2, er * 0.065);
+    c.beginPath();                                                    // 눈두덩 윗선의 빛
+    c.moveTo(-er * 1.38, -er * 0.98);
+    c.bezierCurveTo(-er * 0.95, -er * 1.66, er * 0.1, -er * 1.84, er * 0.8, -er * 1.2);
+    c.quadraticCurveTo(er * 1.2, -er * 0.92, er * 1.36, tipY - er * 0.14);
+    c.stroke();
+    c.restore();
+  }
+
+  /**
+   * 혀: 입(x0,y0)에서 채찍처럼 물결치며 뻗어 기절한 아이를 휘감고 끌어온다.
+   * 뿌리는 굵고 끝은 가늘다. 젖은 윤기와 침방울, 가운데 골, 돌기.
+   */
+  drawTongue(c, x0, y0) {
+    const m = this.maw, r = this.r, T = this.time, P = m.prey;
+    const px = P.x - this.camX, py = P.y - this.heightOf(P) - LIFT * r;
+    const k = 1 - Math.pow(1 - m.tongue, 3);                       // 확 뻗는다
+    const hold = m.attached ? 1 : 0;
+    const tx = lerp(x0, px - r * 0.95 * hold, k), ty = lerp(y0, py + r * 0.1 * hold, k);
+    const dx = tx - x0, dy = ty - y0, len = Math.hypot(dx, dy) || 1;
+    const vx = -dy / len, vy = dx / len;
+    const slack = m.attached ? 0.22 : 1;
+    const N = 24, pts = [];
+    for (let i = 0; i <= N; i++) {
+      const s = i / N, env = Math.sin(Math.PI * s);
+      const o = env * r * (0.45 * slack + Math.sin(s * 9 - T * 20) * 0.36 * slack)   // 느슨하면 채찍처럼 물결친다
+        + env * Math.sin(s * 15 - T * 44) * r * 0.05 * hold;                           // 팽팽하면 부르르 떤다
+      const lump = hold * Math.max(0, Math.sin(s * 7 + T * 11)) * 0.1;                  // 꿀꺽꿀꺽 넘기는 혹
+      pts.push({ x: x0 + dx * s + vx * o, y: y0 + dy * s + vy * o, w: r * (0.52 - 0.22 * s + lump) });
+    }
+    spine(pts);
+
+    c.save();
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    // 바닥에 떨어지는 그림자
+    c.save(); c.translate(0, r * 0.75);
+    rail(c, pts, 0); c.strokeStyle = 'rgba(0,0,0,.2)'; c.lineWidth = r * 0.55; c.stroke();
+    c.restore();
+    // 몸: 짙은 테두리 -> 살 -> 아랫면 그늘 -> 윗면 빛
+    ribbon(c, pts, -1.2, 1.2); c.fillStyle = '#560828'; c.fill();
+    const tg = c.createLinearGradient(x0, y0, tx, ty);
+    tg.addColorStop(0, '#a01447'); tg.addColorStop(0.5, '#e8336f'); tg.addColorStop(1, '#ff5c93');
+    ribbon(c, pts, -1, 1); c.fillStyle = tg; c.fill();
+    ribbon(c, pts, 0.4, 1); c.fillStyle = 'rgba(110,8,60,.45)'; c.fill();
+    ribbon(c, pts, -0.82, -0.25); c.fillStyle = 'rgba(255,170,200,.5)'; c.fill();
+    // 가운데 골
+    rail(c, pts, 0.08, 0, 0.86); c.strokeStyle = 'rgba(120,8,52,.55)'; c.lineWidth = Math.max(1, r * 0.07); c.stroke();
+    // 돌기
+    c.fillStyle = 'rgba(255,196,214,.55)';
+    for (let i = 2; i < N - 1; i++) {
+      const p = pts[i], o = (i % 2 ? 0.42 : -0.1) + ((i * 7) % 5) * 0.06;
+      c.beginPath(); c.arc(p.x + p.nx * p.w * o, p.y + p.ny * p.w * o, r * 0.045, 0, Math.PI * 2); c.fill();
+    }
+    // 젖은 윤기 (흐르듯 움직인다)
+    rail(c, pts, -0.58, 0.03, 0.95);
+    c.strokeStyle = 'rgba(255,255,255,.78)'; c.lineWidth = Math.max(1, r * 0.075);
+    c.setLineDash([r * 0.55, r * 0.4]); c.lineDashOffset = -T * r * 3;
+    c.stroke();
+    c.setLineDash([]);
+    // 침방울: 혀에서 뚝뚝 떨어진다
+    for (let j = 0; j < 3; j++) {
+      const p = spineAt(pts, 0.25 + j * 0.27), ph = (T * 1.1 + j * 0.37) % 1;
+      const bx = p.x, by = p.y + p.w + ph * ph * r * 2.2, br = r * 0.09 * (1 - ph * 0.4);
+      c.fillStyle = `rgba(200,255,230,${0.75 * (1 - ph)})`;
+      c.beginPath();
+      c.moveTo(bx, by - br * 2.4); c.quadraticCurveTo(bx + br * 1.3, by, bx, by + br);
+      c.quadraticCurveTo(bx - br * 1.3, by, bx, by - br * 2.4);
+      c.fill();
+    }
+
+    if (m.attached) {
+      // 먹잇감을 두 바퀴 휘감았다 (꽉 조였다 풀었다)
+      const sq = 1 + 0.05 * Math.sin(T * 16);
+      const band = (cy, rx, ry, tilt, a0, a1) => {
+        for (const [col, w, off] of [['#560828', 0.46, 0], ['#e8336f', 0.33, 0], ['rgba(255,175,205,.75)', 0.1, -0.09]]) {
+          c.strokeStyle = col; c.lineWidth = r * w;
+          c.beginPath(); c.ellipse(px, cy + r * off, rx * sq, ry, tilt, a0, a1); c.stroke();
+        }
+      };
+      band(py + r * 0.12, r * 0.98, r * 0.34, -0.2, 0.02 * Math.PI, 1.0 * Math.PI);
+      band(py - r * 0.34, r * 0.86, r * 0.28, -0.26, 0.06 * Math.PI, 0.97 * Math.PI);
+      // 끝은 도르르 말려 있다
+      const ex = px + r * 0.8, ey = py - r * 0.52;
+      c.fillStyle = '#560828'; c.beginPath(); c.arc(ex, ey, r * 0.27, 0, Math.PI * 2); c.fill();
+      c.fillStyle = '#ff5c93'; c.beginPath(); c.arc(ex, ey, r * 0.2, 0, Math.PI * 2); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.8)'; c.beginPath(); c.arc(ex - r * 0.07, ey - r * 0.07, r * 0.06, 0, Math.PI * 2); c.fill();
+    } else {
+      // 끝: 끈끈한 방울 (날아가는 쪽으로 길쭉하다)
+      const ang = Math.atan2(pts[N].y - pts[N - 2].y, pts[N].x - pts[N - 2].x);
+      c.save(); c.translate(tx, ty); c.rotate(ang);
+      c.fillStyle = '#560828'; c.beginPath(); c.ellipse(r * 0.1, 0, r * 0.62, r * 0.5, 0, 0, Math.PI * 2); c.fill();
+      const bg = c.createRadialGradient(-r * 0.05, -r * 0.15, r * 0.05, r * 0.1, 0, r * 0.55);
+      bg.addColorStop(0, '#ffa0c2'); bg.addColorStop(0.6, '#ff4f86'); bg.addColorStop(1, '#c21d5c');
+      c.fillStyle = bg; c.beginPath(); c.ellipse(r * 0.1, 0, r * 0.52, r * 0.4, 0, 0, Math.PI * 2); c.fill();
+      c.fillStyle = 'rgba(255,255,255,.85)';
+      c.beginPath(); c.ellipse(-r * 0.02, -r * 0.18, r * 0.16, r * 0.08, -0.3, 0, Math.PI * 2); c.fill();
+      c.restore();
     }
     c.restore();
   }
@@ -2102,89 +2485,288 @@ class RaceGame {
   }
 
   /**
-   * 벽의 한 줄이 튀어나와 무는 공격.
-   * 예고: 그 줄의 벽만 주황-빨강으로 달아오르며 꿈틀대고, 앞에 느낌표, 바닥엔 닿을 거리까지 옅은 빨간 띠.
-   * 공격: 그 부분이 굵은 목처럼 쭉 뻗고, 끝의 입이 쩍 벌어졌다 닫힌다.
+   * 벽의 한 줄에서 뱀 머리가 튀어나와 무는 공격.
+   * 예고: 그 줄의 벽만 주황-빨강으로 달아오르고, 구멍에서 주둥이가 슬금슬금 비어져 나와 혀를 날름거린다.
+   *       바닥엔 닿을 거리까지 빨간 띠와 흐르는 화살표, 앞에는 느낌표.
+   * 공격: 비늘 덮인 목이 쭉 뻗고, 송곳니 달린 위아래 턱이 쩍 벌어졌다가 콱 닫힌다.
    */
   drawStrike(c, fx, wave) {
-    const m = this.maw, r = this.r;
+    const m = this.maw, r = this.r, T = this.time;
     const warn = m.state === 'warn';
     const ly = m.lane, hh = r * STRIKE_HALF;
     const k = warn ? clamp(m.t / m.warnT, 0, 1) : 1;                 // 예고가 무르익는 정도
-    const pulse = 0.5 + 0.5 * Math.sin(this.time * (10 + k * 14));
+    const pulse = 0.5 + 0.5 * Math.sin(T * (10 + k * 14));
 
-    // 닿을 거리까지 바닥에 옅은 빨간 띠
+    // 닿을 거리까지 바닥에 옅은 빨간 띠 + 오른쪽으로 흐르는 화살표
     if (warn) {
       const g = c.createLinearGradient(fx, 0, fx + m.reach, 0);
       g.addColorStop(0, `rgba(255,60,60,${0.1 + 0.16 * k * pulse})`);
       g.addColorStop(1, 'rgba(255,60,60,0)');
       c.fillStyle = g;
       c.fillRect(fx, ly - hh, m.reach, hh * 2);
+      c.save();
+      c.beginPath(); c.rect(fx, ly - hh, m.reach, hh * 2); c.clip();
+      c.lineWidth = r * 0.16; c.lineCap = 'round'; c.lineJoin = 'round';
+      const gap = r * 1.7, off = (T * r * 7) % gap;
+      for (let x = fx + off; x < fx + m.reach; x += gap) {
+        c.strokeStyle = `rgba(255,110,110,${(1 - (x - fx) / m.reach) * (0.1 + 0.3 * k)})`;
+        c.beginPath(); c.moveTo(x - r * 0.4, ly - hh * 0.55); c.lineTo(x, ly); c.lineTo(x - r * 0.4, ly + hh * 0.55); c.stroke();
+      }
+      c.restore();
     }
 
     // 그 줄의 벽이 달아오른다
     c.save();
     c.beginPath();
-    c.moveTo(-40, ly - hh * 1.5);
-    for (let y = ly - hh * 1.5; y <= ly + hh * 1.5; y += 4) c.lineTo(fx + wave(y) + r * 0.3, y);
-    c.lineTo(-40, ly + hh * 1.5);
-    c.closePath();
-    const hot = c.createLinearGradient(fx - r * 6, 0, fx + r, 0);
-    hot.addColorStop(0, 'rgba(255,80,40,0)');
-    hot.addColorStop(1, `hsla(${lerp(28, 2, k)},100%,${52 + pulse * 10}%,${0.55 + 0.35 * k})`);
+    c.moveTo(-40, ly - hh * 2.6);
+    for (let y = ly - hh * 2.6; y <= ly + hh * 2.6; y += 4) c.lineTo(fx + wave(y) + r * 0.12, y);
+    c.lineTo(-40, ly + hh * 2.6);
+    c.closePath(); c.clip();
+    c.globalCompositeOperation = 'lighter';
+    c.translate(fx + wave(ly), ly); c.scale(1, (hh * 2.3) / (r * 6.5));   // 옆으로 길쭉한 불빛
+    const hot = c.createRadialGradient(0, 0, 0, 0, 0, r * 6.5);
+    const hotHue = lerp(28, 2, k), hotA = (0.5 + 0.35 * k) * (0.75 + 0.25 * pulse);
+    hot.addColorStop(0, `hsla(${hotHue},100%,${56 + pulse * 10}%,${hotA})`);
+    hot.addColorStop(0.45, `hsla(${hotHue - 6},100%,50%,${hotA * 0.45})`);
+    hot.addColorStop(1, `hsla(${hotHue - 10},100%,45%,0)`);
     c.fillStyle = hot;
-    c.shadowColor = '#ff3b2f'; c.shadowBlur = 14 + 16 * pulse;
-    c.fill();
+    c.fillRect(-r * 6.5, -r * 6.5, r * 7.5, r * 13);
     c.restore();
 
-    // 튀어나온 목과 머리 (예고 중에는 살짝 꿈틀거리며 비어져 나온다)
-    const ext = warn ? (0.03 + 0.03 * pulse) * k : m.ext;
-    const len = Math.max(r * 0.6, m.reach * ext);
-    const x0 = fx - r, tip = fx + len;
-    const hx = tip - hh * 0.9;                                          // 머리 중심
-    const body = c.createLinearGradient(x0, 0, tip, 0);
-    body.addColorStop(0, '#1a0410');
-    body.addColorStop(1, `hsl(${lerp(330, 356, k)},70%,${26 + 8 * pulse * (warn ? 1 : 0)}%)`);
-    c.fillStyle = body;
-    c.shadowColor = 'rgba(255,40,60,.9)'; c.shadowBlur = 12;
-    c.beginPath();                                                       // 목 (위아래가 꿈틀댄다)
-    const wig = (x) => Math.sin(x * 0.06 - this.time * 14) * r * 0.12;
-    c.moveTo(x0, ly - hh * 0.8);
-    for (let x = x0; x <= hx; x += 6) c.lineTo(x, ly - hh * 0.72 + wig(x));
-    for (let x = hx; x >= x0; x -= 6) c.lineTo(x, ly + hh * 0.72 - wig(x));
-    c.closePath(); c.fill();
-    c.beginPath(); c.ellipse(hx, ly, hh * 1.05, hh * 1.1, 0, 0, Math.PI * 2); c.fill();
-    c.shadowBlur = 0;
+    // 머리가 나오는 구멍
+    const sx = fx + wave(ly);
+    c.fillStyle = '#16000a';
+    c.beginPath(); c.ellipse(sx - r * 0.25, ly, r * 0.62, hh * 1.0, 0, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = `hsl(${lerp(338, 368, k)},72%,${34 + 12 * pulse}%)`; c.lineWidth = r * 0.2;
+    c.beginPath(); c.ellipse(sx - r * 0.25, ly, r * 0.62, hh * 1.0, 0, -Math.PI * 0.5, Math.PI * 0.5); c.stroke();
 
-    // 입: 뻗을수록 쩍 벌어진다
-    const open = warn ? 0.15 : Math.sin(Math.PI * clamp(m.t / 0.4, 0, 1)) * 0.9 + 0.1;
-    const mo = hh * 0.85 * open;
-    c.fillStyle = '#2a0006';
+    // 뻗은 정도: 예고 중에는 주둥이가 조금씩 비어져 나온다
+    const len = warn ? r * (0.5 + 1.6 * k + 0.12 * pulse)
+      : Math.max(r * (m.t < 0.4 ? 2.1 : 0.2), m.reach * m.ext);
+    const open = warn ? 0.1 + 0.12 * pulse * k : Math.sin(Math.PI * clamp(m.t / 0.4, 0, 1)) * 0.9 + 0.1;   // 뻗을수록 쩍 벌어진다
+    const u = hh * 0.9;                                               // 머리 크기의 단위
+    const tip = fx + len, hingeX = tip - u * 1.62;                    // 주둥이 끝 / 턱이 꺾이는 자리
+    const hH = lerp(322, 356, k);                                      // 살빛 (달아오를수록 붉다)
+
+    c.save();
+    c.lineJoin = 'round'; c.lineCap = 'round';
+    // 벽 밖으로 나온 만큼만 보인다 (구멍 안쪽에서 잘린다)
     c.beginPath();
-    c.moveTo(hx - hh * 0.1, ly);
-    c.lineTo(tip + hh * 0.25, ly - mo); c.lineTo(tip + hh * 0.25, ly + mo);
-    c.closePath(); c.fill();
-    c.fillStyle = '#fff4e8'; c.strokeStyle = 'rgba(40,10,40,.6)'; c.lineWidth = 1.2;
-    for (let i = 0; i < 3; i++) {                                       // 윗니, 아랫니
-      const tx = hx + hh * (0.15 + i * 0.32);
-      for (const s of [-1, 1]) {
-        const ty = ly + s * (mo * (0.55 + i * 0.18) + hh * 0.08);
-        c.beginPath();
-        c.moveTo(tx - hh * 0.14, ty); c.lineTo(tx + hh * 0.14, ty); c.lineTo(tx, ty - s * hh * 0.42);
-        c.closePath(); c.fill(); c.stroke();
+    c.rect(sx - r * 0.5, ly - hh * 3, this.W + 60, hh * 6);
+    c.clip();
+
+    // 쏜살같이 뻗을 때 뒤로 남는 속도선
+    if (!warn && m.t < 0.3) {
+      const a = 1 - m.t / 0.3;
+      c.lineWidth = r * 0.1;
+      for (let j = 0; j < 7; j++) {
+        const yy = ly + (j / 6 - 0.5) * hh * 2.3, l = len * (0.35 + 0.4 * ((j * 37) % 10) / 10);
+        c.strokeStyle = `rgba(255,200,210,${0.5 * a})`;
+        c.beginPath(); c.moveTo(tip - u * 0.6 - l, yy); c.lineTo(tip - u * 0.8, yy); c.stroke();
       }
     }
-    // 눈
-    c.fillStyle = `hsl(${lerp(50, 8, k)},100%,58%)`;
-    c.shadowColor = '#ffcc33'; c.shadowBlur = 10;
-    c.beginPath(); c.ellipse(hx - hh * 0.2, ly - hh * 0.62, hh * 0.26, hh * 0.2, 0, 0, Math.PI * 2); c.fill();
+
+    /* 목: 벽 속 뿌리에서 뒤통수까지. 느슨할 때는 꿈틀대고 다 뻗으면 팽팽해진다 */
+    const xA = fx - r * 1.6, nL = Math.max(hingeX - u * 0.5 - xA, r * 0.5);
+    const N = Math.max(4, Math.ceil(nL / (r * 0.3)));
+    const taut = warn ? 0.7 : 1 - 0.7 * m.ext;
+    const P = [];
+    for (let i = 0; i <= N; i++) {
+      const s = i / N, x = xA + nL * s;
+      P.push({
+        x, y: ly + Math.sin(x * 0.045 - T * 13) * hh * 0.2 * taut * Math.sin(Math.PI * s),
+        w: hh * (0.68 - 0.06 * s + 0.04 * Math.sin((hingeX - x) * 0.08 + T * 6)),
+      });
+    }
+    spine(P);
+    const ng = c.createLinearGradient(xA, 0, hingeX, 0);
+    ng.addColorStop(0, '#12020b'); ng.addColorStop(1, `hsl(${hH},70%,${27 + 6 * pulse * (warn ? 1 : 0)}%)`);
+    ribbon(c, P, -1, 1);
+    c.strokeStyle = 'rgba(255,40,60,.2)'; c.lineWidth = r * 0.7; c.stroke();     // 몸에서 번지는 붉은 빛
+    c.fillStyle = ng; c.fill();
+    // 등의 가시 (뒤로 누웠다)
+    c.fillStyle = `hsl(${hH},72%,15%)`; c.strokeStyle = `hsla(${hH + 10},95%,66%,.7)`; c.lineWidth = Math.max(1, r * 0.05);
+    for (let d = r * 0.5; d < nL; d += r * 0.72) {
+      const p = spineAt(P, 1 - d / nL), q = r * 0.2, hgt = r * 0.42;
+      const ax = p.x - p.nx * p.w, ay = p.y - p.ny * p.w;
+      c.beginPath();
+      c.moveTo(ax + q, ay + 1); c.lineTo(ax - q * 2.1 - p.nx * hgt, ay - p.ny * hgt); c.lineTo(ax - q, ay + 1);
+      c.closePath(); c.fill(); c.stroke();
+    }
+    // 배: 밝은 살빛 띠와 가로 마디
+    const bg = c.createLinearGradient(xA, 0, hingeX, 0);
+    bg.addColorStop(0, 'rgba(120,40,50,.2)'); bg.addColorStop(1, '#f2b49c');
+    ribbon(c, P, 0.34, 1); c.fillStyle = bg; c.fill();
+    c.strokeStyle = 'rgba(120,30,50,.5)'; c.lineWidth = Math.max(1, r * 0.05);
+    c.beginPath();
+    for (let d = r * 0.3; d < nL; d += r * 0.4) {
+      const p = spineAt(P, 1 - d / nL);
+      c.moveTo(p.x + p.nx * p.w * 0.36, p.y + p.ny * p.w * 0.36);
+      c.lineTo(p.x + p.nx * p.w * 0.98 - r * 0.08, p.y + p.ny * p.w * 0.98);
+    }
+    c.stroke();
+    // 등의 마름모 무늬
+    c.fillStyle = 'rgba(20,0,16,.42)';
+    for (let d = r * 0.8; d < nL; d += r * 1.15) {
+      const p = spineAt(P, 1 - d / nL);
+      const cx = p.x - p.nx * p.w * 0.36, cy = p.y - p.ny * p.w * 0.36, a = r * 0.42, b = p.w * 0.46;
+      c.beginPath(); c.moveTo(cx - a, cy); c.lineTo(cx, cy - b); c.lineTo(cx + a, cy); c.lineTo(cx, cy + b); c.closePath(); c.fill();
+    }
+    // 테두리와 등의 윤기
+    ribbon(c, P, -1, 1); c.strokeStyle = '#170310'; c.lineWidth = r * 0.09; c.stroke();
+    rail(c, P, -0.78); c.strokeStyle = `hsla(${hH + 8},100%,74%,.55)`; c.lineWidth = Math.max(1.2, r * 0.07); c.stroke();
+
+    /* 머리: 턱이 꺾이는 자리를 중심으로 위아래 턱이 따로 벌어진다 */
+    c.translate(hingeX, ly);
+    c.rotate(Math.sin(T * 13) * 0.05 * taut);
+    const aU = -open * 0.5, aL = open * 0.68;
+    const rot = (x, y, a) => [x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a)];
+    // 입속
+    const [ux, uy] = rot(1.5 * u, 0.05 * u, aU), [lx, lw] = rot(1.42 * u, 0.1 * u, aL);
+    const mg = c.createRadialGradient(-0.2 * u, 0, 0, -0.2 * u, 0, u * 1.7);
+    mg.addColorStop(0, '#120004'); mg.addColorStop(0.5, '#5a0a22'); mg.addColorStop(1, '#b01c42');
+    c.fillStyle = mg;
+    c.beginPath(); c.moveTo(-0.5 * u, -0.1 * u); c.lineTo(ux, uy); c.lineTo(lx, lw); c.lineTo(-0.5 * u, 0.12 * u); c.closePath(); c.fill();
+    // 위아래 턱 사이에 늘어진 침
+    if (open > 0.3) {
+      c.strokeStyle = `rgba(210,255,232,${0.55 * open})`; c.lineWidth = Math.max(1, r * 0.05);
+      for (const q of [0.55, 0.95]) {
+        const [x1, y1] = rot(q * u, 0.1 * u, aU), [x2, y2] = rot(q * u * 0.96, 0.16 * u, aL);
+        c.beginPath(); c.moveTo(x1, y1); c.quadraticCurveTo((x1 + x2) / 2 - u * 0.12, (y1 + y2) / 2, x2, y2); c.stroke();
+      }
+    }
+    const tooth = (x, y, h, w, dir, lean) => {                        // 송곳니 하나 (dir 1 아래로 / -1 위로, lean 뒤로 휜 정도)
+      c.beginPath();
+      c.moveTo(x - w, y); c.quadraticCurveTo(x - w * 0.4 - lean * 0.3, y + dir * h * 0.6, x - lean, y + dir * h);
+      c.quadraticCurveTo(x + w * 0.9, y + dir * h * 0.45, x + w, y);
+      c.closePath(); c.fill(); c.stroke();
+    };
+
+    // 아래턱
+    c.save();
+    c.rotate(aL);
+    // 갈라진 혀: 예고 때는 밖으로 날름거린다
+    const flick = warn ? Math.max(0, Math.sin(T * 9)) * (0.4 + 0.6 * k) : 0.1;
+    const tl = u * (1.2 + 0.95 * flick), fw = Math.sin(T * 30) * u * 0.05;
+    c.strokeStyle = '#7a0c34'; c.lineWidth = u * 0.15;
+    for (let pass = 0; pass < 2; pass++) {
+      c.beginPath();
+      c.moveTo(0.3 * u, 0.06 * u); c.quadraticCurveTo(0.9 * u, -0.06 * u + fw, tl, 0.02 * u + fw);
+      c.moveTo(tl - u * 0.02, 0.02 * u + fw); c.lineTo(tl + u * 0.26, -0.13 * u + fw * 2);
+      c.moveTo(tl - u * 0.02, 0.02 * u + fw); c.lineTo(tl + u * 0.26, 0.15 * u + fw * 2);
+      c.stroke();
+      c.strokeStyle = '#ff6a98'; c.lineWidth = u * 0.085;
+    }
+    c.fillStyle = '#f6ead2'; c.strokeStyle = 'rgba(40,10,40,.65)'; c.lineWidth = 1.2;
+    tooth(1.24 * u, 0.12 * u, 0.36 * u, 0.1 * u, -1, 0.06 * u);
+    for (const q of [0.98, 0.76, 0.54, 0.32]) tooth(q * u, 0.15 * u, 0.2 * u, 0.08 * u, -1, 0.03 * u);
+    const jg = c.createLinearGradient(0, 0, 0, 0.8 * u);
+    jg.addColorStop(0, `hsl(${hH},72%,30%)`); jg.addColorStop(0.45, `hsl(${hH + 8},70%,48%)`); jg.addColorStop(1, '#f6c0a6');
+    c.beginPath();
+    c.moveTo(-0.3 * u, 0.04 * u);
+    c.bezierCurveTo(0.4 * u, 0.24 * u, 1.0 * u, 0.2 * u, 1.42 * u, 0.1 * u);    // 아랫입술
+    c.bezierCurveTo(1.6 * u, 0.14 * u, 1.6 * u, 0.36 * u, 1.38 * u, 0.44 * u);   // 턱끝
+    c.bezierCurveTo(0.8 * u, 0.7 * u, 0.0 * u, 0.84 * u, -0.6 * u, 0.62 * u);    // 턱밑
+    c.bezierCurveTo(-0.92 * u, 0.46 * u, -0.86 * u, 0.06 * u, -0.3 * u, 0.04 * u);
+    c.closePath();
+    c.fillStyle = jg; c.fill();
+    c.strokeStyle = '#170310'; c.lineWidth = r * 0.09; c.stroke();
+    c.strokeStyle = 'rgba(130,40,60,.5)'; c.lineWidth = Math.max(1, r * 0.05);   // 턱밑 마디
+    c.beginPath();
+    for (const q of [0.1, 0.42, 0.74, 1.04]) { c.moveTo(q * u, 0.52 * u - q * 0.06 * u); c.lineTo(q * u - 0.06 * u, 0.72 * u - q * 0.2 * u); }
+    c.stroke();
+    c.restore();
+
+    // 위턱과 머리통
+    c.save();
+    c.rotate(aU);
+    c.fillStyle = '#fbf2de'; c.strokeStyle = 'rgba(40,10,40,.65)'; c.lineWidth = 1.2;
+    for (const q of [0.74, 0.52, 0.3]) tooth(q * u, 0.04 * u, 0.2 * u, 0.08 * u, 1, 0.03 * u);
+    tooth(1.02 * u, 0.05 * u, 0.48 * u, 0.12 * u, 1, 0.1 * u);
+    tooth(1.3 * u, 0.02 * u, 0.62 * u, 0.13 * u, 1, 0.14 * u);        // 맨 앞의 큰 송곳니
+    // 뒤통수의 뿔 (뒤로 누웠다)
+    c.fillStyle = `hsl(${hH},70%,14%)`; c.strokeStyle = `hsla(${hH + 10},95%,66%,.7)`; c.lineWidth = Math.max(1, r * 0.05);
+    for (const [bx, by, tx, ty] of [[-0.25, -1.0, -0.95, -1.5], [-0.55, -0.82, -1.3, -1.08], [0.1, -1.02, -0.3, -1.52]]) {
+      c.beginPath();
+      c.moveTo((bx + 0.2) * u, by * u); c.quadraticCurveTo((bx + tx) / 2 * u, (ty - 0.08) * u, tx * u, ty * u);
+      c.quadraticCurveTo((bx + tx) / 2 * u, (by + ty) / 2 * u + 0.1 * u, (bx - 0.14) * u, (by + 0.12) * u);
+      c.closePath(); c.fill(); c.stroke();
+    }
+    const skull = new Path2D();
+    skull.moveTo(-0.2 * u, 0.1 * u);
+    skull.bezierCurveTo(-0.72 * u, 0.12 * u, -0.98 * u, -0.3 * u, -0.72 * u, -0.72 * u);   // 뒤통수
+    skull.bezierCurveTo(-0.45 * u, -1.04 * u, 0.1 * u, -1.1 * u, 0.44 * u, -0.88 * u);     // 정수리 ~ 눈두덩
+    skull.bezierCurveTo(0.82 * u, -0.6 * u, 1.2 * u, -0.64 * u, 1.48 * u, -0.48 * u);      // 콧등
+    skull.bezierCurveTo(1.74 * u, -0.36 * u, 1.74 * u, 0.02 * u, 1.5 * u, 0.06 * u);       // 주둥이 끝
+    skull.bezierCurveTo(1.0 * u, 0.17 * u, 0.5 * u, 0.02 * u, -0.2 * u, 0.1 * u);          // 윗입술
+    skull.closePath();
+    const sg = c.createLinearGradient(0, -1.08 * u, 0, 0.14 * u);
+    sg.addColorStop(0, `hsl(${hH},68%,${15 + 4 * pulse * (warn ? 1 : 0)}%)`);
+    sg.addColorStop(0.55, `hsl(${hH},74%,32%)`);
+    sg.addColorStop(1, `hsl(${hH + 8},84%,50%)`);
+    c.strokeStyle = 'rgba(255,40,60,.2)'; c.lineWidth = r * 0.7; c.stroke(skull);
+    c.fillStyle = sg;
+    c.fill(skull);
+    c.save();
+    c.clip(skull);
+    // 정수리의 짙은 무늬와 뺨 비늘
+    c.fillStyle = 'rgba(16,0,14,.4)';
+    for (const [qx, qy, qa, qb] of [[-0.3, -0.86, 0.3, 0.16], [0.22, -0.9, 0.26, 0.14], [0.95, -0.6, 0.24, 0.1]]) {
+      c.beginPath(); c.moveTo((qx - qa) * u, qy * u); c.lineTo(qx * u, (qy - qb) * u); c.lineTo((qx + qa) * u, qy * u); c.lineTo(qx * u, (qy + qb) * u); c.closePath(); c.fill();
+    }
+    c.strokeStyle = 'rgba(20,0,16,.3)'; c.lineWidth = Math.max(1, r * 0.05);
+    c.beginPath();
+    for (const [qx, qy] of [[-0.42, -0.3], [-0.12, -0.18], [-0.3, -0.02], [0.14, -0.04], [-0.6, -0.1]]) {
+      c.moveTo(qx * u, (qy - 0.13) * u); c.arc(qx * u, qy * u, 0.13 * u, -Math.PI / 2, Math.PI / 2);
+    }
+    c.stroke();
+    // 윗입술의 밝은 선
+    c.strokeStyle = 'rgba(255,170,190,.6)'; c.lineWidth = Math.max(1.2, r * 0.07);
+    c.beginPath(); c.moveTo(1.5 * u, 0.0); c.bezierCurveTo(1.0 * u, 0.1 * u, 0.5 * u, -0.04 * u, -0.1 * u, 0.04 * u); c.stroke();
+    c.restore();
+    c.strokeStyle = '#170310'; c.lineWidth = r * 0.09; c.stroke(skull);
+    // 콧등의 윤기
+    c.strokeStyle = `hsla(${hH + 8},100%,76%,.6)`; c.lineWidth = Math.max(1.2, r * 0.07);
+    c.beginPath(); c.moveTo(-0.4 * u, -0.94 * u); c.bezierCurveTo(0.0, -1.02 * u, 0.3 * u, -0.92 * u, 0.44 * u, -0.8 * u); c.stroke();
+    c.beginPath(); c.moveTo(0.9 * u, -0.56 * u); c.quadraticCurveTo(1.25 * u, -0.56 * u, 1.5 * u, -0.4 * u); c.stroke();
+    // 콧구멍
+    c.fillStyle = '#12000a';
+    c.beginPath(); c.ellipse(1.46 * u, -0.26 * u, 0.075 * u, 0.04 * u, -0.5, 0, Math.PI * 2); c.fill();
+    // 눈: 번뜩이는 노란 눈에 세로 동공, 그 위로 사나운 눈두덩
+    const eyx = 0.52 * u, eyy = -0.5 * u;
+    c.fillStyle = '#0c0006';
+    c.beginPath(); c.ellipse(eyx, eyy, 0.31 * u, 0.24 * u, 0.28, 0, Math.PI * 2); c.fill();
+    c.fillStyle = `hsl(${lerp(52, 12, k)},100%,${58 + 8 * pulse}%)`;
+    c.shadowColor = '#ffcc33'; c.shadowBlur = 10 + 8 * pulse;
+    c.beginPath(); c.ellipse(eyx, eyy, 0.25 * u, 0.18 * u, 0.28, 0, Math.PI * 2); c.fill();
     c.shadowBlur = 0;
-    c.fillStyle = '#1a0008';
-    c.beginPath(); c.ellipse(hx - hh * 0.12, ly - hh * 0.62, hh * 0.07, hh * 0.17, 0, 0, Math.PI * 2); c.fill();
+    c.fillStyle = '#12000a';
+    c.beginPath(); c.ellipse(eyx + 0.04 * u, eyy, 0.05 * u, 0.16 * u, 0.2, 0, Math.PI * 2); c.fill();
+    c.fillStyle = 'rgba(255,255,255,.9)';
+    c.beginPath(); c.arc(eyx - 0.08 * u, eyy - 0.07 * u, 0.045 * u, 0, Math.PI * 2); c.fill();
+    c.fillStyle = `hsl(${hH},68%,12%)`;
+    c.beginPath();
+    c.moveTo(0.1 * u, -0.92 * u); c.quadraticCurveTo(0.55 * u, -0.78 * u, 0.9 * u, -0.5 * u);
+    c.quadraticCurveTo(0.5 * u, -0.6 * u, 0.12 * u, -0.66 * u);
+    c.closePath(); c.fill();
+    c.restore();
+
+    // 콱 닫히는 순간의 번쩍임
+    if (!warn && m.t > 0.36 && m.t < 0.52) {
+      const a = 1 - (m.t - 0.36) / 0.16;
+      c.strokeStyle = `rgba(255,255,255,${0.9 * a})`; c.lineWidth = r * 0.12;
+      for (let j = 0; j < 7; j++) {
+        const an = (j / 6 - 0.5) * 2.4, r0 = u * (0.5 + 0.5 * (1 - a)), r1 = r0 + u * 0.5;
+        c.beginPath();
+        c.moveTo(1.6 * u + Math.cos(an) * r0, Math.sin(an) * r0); c.lineTo(1.6 * u + Math.cos(an) * r1, Math.sin(an) * r1);
+        c.stroke();
+      }
+    }
+    c.restore();
 
     // 느낌표 (깜빡이며 커진다)
-    if (warn && Math.sin(this.time * 20) > -0.3) {
-      this.drawAlert(c, Math.max(tip, 0) + r * 1.7, ly - r * 0.2, r * (1.05 + 0.3 * k));
+    if (warn && Math.sin(T * 20) > -0.3) {
+      this.drawAlert(c, Math.max(tip, 0) + r * 1.9, ly - r * 0.2, r * (1.05 + 0.3 * k));
     }
   }
 
@@ -2197,17 +2779,76 @@ class RaceGame {
     c.closePath();
   }
 
-  /** 날개 한 쪽 (s: -1 왼쪽, 1 오른쪽 / flap: 펄럭이는 각도) */
-  drawWing(c, x, y, s, size, flap, fill) {
+  /**
+   * 날개 한 쪽 (sd: -1 왼쪽, 1 오른쪽 / S: 크기 / flap: -1 올림 ~ 1 내림 / rich: 깃을 촘촘히)
+   * 어깨에서 손목까지 뼈대가 서고, 손목에서 긴 칼깃이 부채처럼 퍼지며, 팔뚝에서 버금깃이 드리운다.
+   * 그 위를 짧은 덮깃 두 줄이 덮는다. 내려칠 때 깃이 활짝 벌어진다.
+   */
+  drawWing(c, x, y, sd, S, flap, rich) {
     c.save();
-    c.translate(x, y); c.scale(s, 1); c.rotate(-0.25 - flap);
-    c.fillStyle = fill;
-    c.strokeStyle = 'rgba(150,170,210,.8)'; c.lineWidth = 1.2;
-    for (let i = 0; i < 4; i++) {                                       // 깃털 네 장 (안쪽이 길다)
+    c.translate(x, y); c.scale(sd, 1);
+    c.rotate(-0.1 - flap * 0.4);
+    c.lineJoin = 'round'; c.lineCap = 'round';
+    const fan = 1 + flap * 0.12;                                      // 내려칠 때 깃이 벌어진다
+    const ink = 'rgba(122,142,204,.62)', lw = Math.max(1, S * 0.022);
+    const gP = c.createLinearGradient(0, 0, S * 0.7, 0);
+    gP.addColorStop(0, '#ffffff'); gP.addColorStop(0.55, '#f1f5ff'); gP.addColorStop(1, '#bccdfa');
+    const gC = c.createLinearGradient(0, 0, S * 0.26, 0);
+    gC.addColorStop(0, '#ffffff'); gC.addColorStop(1, '#dfe8ff');
+    const feather = (bx, by, ang, L, Wd, fill) => {
+      c.save();
+      c.translate(bx, by); c.rotate(ang);
       c.beginPath();
-      c.ellipse(size * (0.35 + i * 0.22), -size * (0.12 + i * 0.1), size * (0.55 - i * 0.07), size * 0.2, -0.35 - i * 0.18, 0, Math.PI * 2);
-      c.fill(); c.stroke();
+      c.moveTo(0, 0);
+      c.bezierCurveTo(L * 0.25, -Wd, L * 0.9, -Wd * 1.0, L, 0);
+      c.bezierCurveTo(L * 0.93, Wd * 0.85, L * 0.3, Wd * 0.75, 0, 0);
+      c.fillStyle = fill; c.fill();
+      c.strokeStyle = ink; c.lineWidth = lw; c.stroke();
+      if (rich) {                                                     // 깃대
+        c.beginPath(); c.moveTo(L * 0.1, 0); c.quadraticCurveTo(L * 0.5, -Wd * 0.14, L * 0.92, 0);
+        c.strokeStyle = 'rgba(150,168,222,.5)'; c.lineWidth = lw * 0.8; c.stroke();
+      }
+      c.restore();
+    };
+    const Wx = S * 0.5, Wy = -S * 0.4, Hx = S * 0.76, Hy = -S * 0.5;   // 손목 / 날개 끝마디
+    // 칼깃: 바깥 것부터 (안쪽 깃이 위에 겹친다)
+    const nP = rich ? 7 : 4;
+    const prim = (t) => S * (0.52 + 0.16 * Math.sin(Math.PI * (0.15 + t * 0.7)));
+    if (rich) {                                                       // 아래에 깔린 그늘진 깃 (날개가 두툼해 보인다)
+      for (let i = 0; i < nP; i++) {
+        const t = i / (nP - 1);
+        feather(lerp(Hx, Wx, t * 0.9), lerp(Hy, Wy, t * 0.9) + S * 0.03, (lerp(-0.3, 1.02, t) + 0.11) * fan, prim(t) * 1.05, S * 0.11, '#c3d1fa');
+      }
     }
+    for (let i = 0; i < nP; i++) {
+      const t = i / (nP - 1);
+      feather(lerp(Hx, Wx, t * 0.9), lerp(Hy, Wy, t * 0.9), lerp(-0.3, 1.02, t) * fan, prim(t), S * 0.108, gP);
+    }
+    // 버금깃: 손목 쪽부터 몸 쪽으로
+    const nS = rich ? 6 : 3;
+    for (let i = 0; i < nS; i++) {
+      const t = i / (nS - 1);
+      feather(lerp(Wx, S * 0.06, t), lerp(Wy, S * 0.02, t) + S * 0.02,
+        lerp(1.12, 1.52, t) * (0.94 + 0.06 * fan), S * lerp(0.52, 0.32, t), S * 0.105, gP);
+    }
+    // 덮깃 두 줄
+    if (rich) {
+      for (let row = 0; row < 2; row++) {
+        const n = row ? 7 : 8;
+        for (let i = 0; i < n; i++) {
+          const t = i / (n - 1), q = 1 - t;                            // 어깨(0) -> 끝마디(1) 를 따라
+          const ax = q * q * 0 + 2 * q * t * S * 0.2 + t * t * Hx, ay = 2 * q * t * (-S * 0.4) + t * t * Hy;
+          feather(ax, ay + S * 0.03, lerp(1.5, 0.5, t) * (0.95 + 0.05 * fan), S * (row ? 0.17 : 0.27), S * 0.085, gC);
+        }
+      }
+    }
+    // 날개 뼈대 (보송한 앞가장자리)
+    for (const [col, w] of [[ink, S * 0.17 + lw * 2], ['#ffffff', S * 0.17]]) {
+      c.strokeStyle = col; c.lineWidth = w;
+      c.beginPath(); c.moveTo(-S * 0.02, S * 0.02); c.quadraticCurveTo(S * 0.2, -S * 0.42, Wx, Wy); c.quadraticCurveTo(S * 0.64, -S * 0.54, Hx, Hy); c.stroke();
+    }
+    c.strokeStyle = 'rgba(205,218,255,.9)'; c.lineWidth = S * 0.045;
+    c.beginPath(); c.moveTo(S * 0.03, S * 0.03); c.quadraticCurveTo(S * 0.23, -S * 0.34, Wx, Wy + S * 0.05); c.stroke();
     c.restore();
   }
 
@@ -2221,8 +2862,8 @@ class RaceGame {
     glow.addColorStop(1, 'rgba(255,225,120,0)');
     c.fillStyle = glow;
     c.beginPath(); c.arc(x, y, r * 2.6, 0, Math.PI * 2); c.fill();
-    const flap = Math.sin(h.t * 9) * 0.35;
-    for (const sd of [-1, 1]) this.drawWing(c, x + sd * s * 0.7, y - s * 0.15, sd, s * 1.15, flap, '#ffffff');
+    const flap = Math.sin(h.t * 9);
+    for (const sd of [-1, 1]) this.drawWing(c, x + sd * s * 0.62, y - s * 0.05, sd, s * 1.5, flap, false);
     const g = c.createLinearGradient(x - s, y - s, x + s, y + s);
     g.addColorStop(0, '#fff3a6'); g.addColorStop(0.45, '#ffc824'); g.addColorStop(1, '#c98400');
     this.heartPath(c, x, y, s);
@@ -2240,9 +2881,12 @@ class RaceGame {
     }
   }
 
-  /** 천사: 빛기둥을 타고 내려와 아이를 내려놓고, 다시 올라가며 사라진다 */
+  /**
+   * 천사: 빛기둥을 타고 내려와 아이를 내려놓고, 손을 흔들며 다시 올라가 사라진다.
+   * 겹겹의 깃이 달린 큰 날개, 물결치는 금발, 금띠를 두른 옷자락, 반짝이는 후광.
+   */
   drawAngel(c, A) {
-    const r = this.r, R = A.R;
+    const r = this.r, R = A.R, T = this.time;
     const x = (A.landed ? A.x : R.x) - this.camX;
     const gy = A.landed ? A.y : R.y;                                    // 내려놓을 땅
     let lift, alpha = 1;
@@ -2255,18 +2899,49 @@ class RaceGame {
       alpha = 1 - k;
     }
     const kidY = -lift - r * 0.25;                                      // 아이를 들어 올린 만큼
+    const by = gy + r * 0.9;                                            // 빛이 닿는 바닥
+    const ay = gy + kidY - r * 3.1 + Math.sin(T * 4.2) * r * 0.07;      // 천사의 가슴 높이 (둥실둥실)
+    const wave = A.landed ? clamp(A.t / 0.2, 0, 1) : 0;                 // 내려놓은 뒤 손을 흔든다
 
     c.save();
+    c.lineJoin = 'round'; c.lineCap = 'round';
     c.globalAlpha = alpha;
-    // 빛기둥
-    const beam = c.createLinearGradient(0, 0, 0, gy + r);
-    beam.addColorStop(0, 'rgba(255,240,170,0)');
-    beam.addColorStop(0.3, 'rgba(255,240,170,.28)');
-    beam.addColorStop(1, 'rgba(255,240,170,.12)');
+
+    /* --- 빛기둥: 겹쳐서 가장자리가 부드럽게, 그 안에 빛살이 일렁인다 --- */
+    c.globalCompositeOperation = 'lighter';
+    const beam = c.createLinearGradient(0, -10, 0, by);
+    beam.addColorStop(0, 'rgba(255,238,170,0)');
+    beam.addColorStop(0.22, 'rgba(255,238,170,.14)');
+    beam.addColorStop(1, 'rgba(255,238,170,.07)');
     c.fillStyle = beam;
-    c.beginPath();
-    c.moveTo(x - r * 1.2, -10); c.lineTo(x + r * 1.2, -10); c.lineTo(x + r * 2.2, gy + r); c.lineTo(x - r * 2.2, gy + r);
-    c.closePath(); c.fill();
+    for (const wk of [1, 0.72, 0.44]) {
+      c.beginPath();
+      c.moveTo(x - r * 1.3 * wk, -10); c.lineTo(x + r * 1.3 * wk, -10);
+      c.lineTo(x + r * 2.8 * wk, by); c.lineTo(x - r * 2.8 * wk, by);
+      c.closePath(); c.fill();
+    }
+    for (let i = 0; i < 5; i++) {
+      const o = (i - 2) / 2, a = 0.04 + 0.08 * (0.5 + 0.5 * Math.sin(T * 2.3 + i * 1.9));
+      c.fillStyle = `rgba(255,246,200,${a})`;
+      c.beginPath();
+      c.moveTo(x + o * r * 1.1 - r * 0.1, -10); c.lineTo(x + o * r * 1.1 + r * 0.1, -10);
+      c.lineTo(x + o * r * 2.4 + r * 0.3, by); c.lineTo(x + o * r * 2.4 - r * 0.3, by);
+      c.closePath(); c.fill();
+    }
+    // 바닥에 고인 빛
+    c.save();
+    c.translate(x, by); c.scale(1, 0.26);
+    const pool = c.createRadialGradient(0, 0, 0, 0, 0, r * 3.2);
+    pool.addColorStop(0, 'rgba(255,240,180,.5)'); pool.addColorStop(1, 'rgba(255,240,180,0)');
+    c.fillStyle = pool;
+    c.beginPath(); c.arc(0, 0, r * 3.2, 0, Math.PI * 2); c.fill();
+    c.restore();
+    // 천사를 감싼 빛무리
+    const aura = c.createRadialGradient(x, ay - r * 0.2, r * 0.3, x, ay - r * 0.2, r * 3.8);
+    aura.addColorStop(0, 'rgba(255,244,200,.42)'); aura.addColorStop(1, 'rgba(255,244,200,0)');
+    c.fillStyle = aura;
+    c.beginPath(); c.arc(x, ay - r * 0.2, r * 3.8, 0, Math.PI * 2); c.fill();
+    c.globalCompositeOperation = 'source-over';
 
     // 데리고 내려오는 아이 (금빛으로 감싼다)
     if (!A.landed) {
@@ -2278,46 +2953,173 @@ class RaceGame {
       c.beginPath(); c.arc(x, gy - r * 0.6, r * 2.2, 0, Math.PI * 2); c.fill();
       this.drawRunner(c, R, false);
       c.restore();
+      c.globalAlpha = alpha;
     }
 
-    // 천사 (아이 머리 위에서 두 손으로 붙잡고 있다)
-    const ay = gy + kidY - r * 3.1;
-    const flap = Math.sin(this.time * 8) * 0.4;
-    for (const sd of [-1, 1]) this.drawWing(c, x + sd * r * 0.45, ay - r * 0.1, sd, r * 1.5, flap, '#f8fbff');
-    // 옷
-    const robe = c.createLinearGradient(x, ay - r * 0.6, x, ay + r * 1.3);
-    robe.addColorStop(0, '#ffffff'); robe.addColorStop(1, '#cfe0ff');
-    c.fillStyle = robe;
+    /* --- 날개 (몸 뒤) --- */
+    const flap = Math.sin(T * (A.landed ? 11 : 7.5));
+    for (const sd of [-1, 1]) this.drawWing(c, x + sd * r * 0.28, ay - r * 0.2, sd, r * 2.7, flap, true);
+
+    const hy = ay - r * 0.92;                                           // 머리 중심
+    const sway = Math.sin(T * 3.1) * r * 0.06;
+    const INK_A = 'rgba(112,128,186,.7)';
+    /* --- 뒷머리: 어깨까지 물결치며 흘러내린다 --- */
+    const hg = c.createLinearGradient(0, hy - r * 0.6, 0, hy + r * 1.0);
+    hg.addColorStop(0, '#ffeaa6'); hg.addColorStop(1, '#f0aa32');
+    c.fillStyle = hg; c.strokeStyle = 'rgba(176,112,24,.7)'; c.lineWidth = Math.max(1, r * 0.05);
     c.beginPath();
-    c.moveTo(x - r * 0.35, ay - r * 0.4); c.lineTo(x + r * 0.35, ay - r * 0.4);
-    c.quadraticCurveTo(x + r * 0.7, ay + r * 0.6, x + r * 0.75, ay + r * 1.25);
-    c.lineTo(x - r * 0.75, ay + r * 1.25);
-    c.quadraticCurveTo(x - r * 0.7, ay + r * 0.6, x - r * 0.35, ay - r * 0.4);
-    c.closePath(); c.fill();
-    c.strokeStyle = 'rgba(120,140,190,.6)'; c.lineWidth = 1.2; c.stroke();
-    c.strokeStyle = '#ffcf3d'; c.lineWidth = r * 0.12;                  // 금 허리띠
-    c.beginPath(); c.moveTo(x - r * 0.5, ay + r * 0.3); c.lineTo(x + r * 0.5, ay + r * 0.3); c.stroke();
-    // 두 팔: 아이 어깨를 잡는다
-    c.strokeStyle = '#ffe2c4'; c.lineWidth = r * 0.2; c.lineCap = 'round';
-    for (const sd of [-1, 1]) {
-      c.beginPath(); c.moveTo(x + sd * r * 0.4, ay - r * 0.1);
-      c.quadraticCurveTo(x + sd * r * 1.0, ay + r * 0.8, x + sd * r * 0.85, ay + r * 1.6); c.stroke();
+    c.moveTo(x, hy - r * 0.66);
+    c.bezierCurveTo(x + r * 0.78, hy - r * 0.66, x + r * 0.78, hy + r * 0.2, x + r * 0.66, hy + r * 0.55);
+    c.quadraticCurveTo(x + r * 0.74 + sway, hy + r * 0.86, x + r * 0.5 + sway, hy + r * 1.02);
+    c.quadraticCurveTo(x + r * 0.42, hy + r * 0.7, x + r * 0.3, hy + r * 0.5);
+    c.lineTo(x - r * 0.3, hy + r * 0.5);
+    c.quadraticCurveTo(x - r * 0.42, hy + r * 0.7, x - r * 0.5 + sway, hy + r * 1.02);
+    c.quadraticCurveTo(x - r * 0.74 + sway, hy + r * 0.86, x - r * 0.66, hy + r * 0.55);
+    c.bezierCurveTo(x - r * 0.78, hy + r * 0.2, x - r * 0.78, hy - r * 0.66, x, hy - r * 0.66);
+    c.closePath(); c.fill(); c.stroke();
+
+    /* --- 옷: 종 모양으로 퍼지고 자락이 물결친다 --- */
+    const hemY = ay + r * 1.24, hemW = r * 0.92;
+    const robe = c.createLinearGradient(x - r * 0.6, ay - r * 0.4, x + r * 0.5, hemY);
+    robe.addColorStop(0, '#ffffff'); robe.addColorStop(0.55, '#f1f5ff'); robe.addColorStop(1, '#bfd0fb');
+    const hem = [];
+    for (let i = 0; i <= 4; i++) hem.push([x + hemW - (i / 4) * hemW * 2 + sway * 0.8, hemY + Math.sin(T * 5 + i * 1.4) * r * 0.06]);
+    c.beginPath();
+    c.moveTo(x - r * 0.24, ay - r * 0.46);
+    c.lineTo(x + r * 0.24, ay - r * 0.46);
+    c.bezierCurveTo(x + r * 0.56, ay - r * 0.36, x + r * 0.58, ay + r * 0.36, hem[0][0], hem[0][1]);
+    for (let i = 1; i <= 4; i++) {                                      // 자락의 둥근 주름
+      const [x0, y0] = hem[i - 1], [x1, y1] = hem[i];
+      c.quadraticCurveTo((x0 + x1) / 2, Math.max(y0, y1) + r * 0.2, x1, y1);
     }
-    // 얼굴 + 머리카락
-    c.fillStyle = '#ffe2c4';
-    c.beginPath(); c.arc(x, ay - r * 0.85, r * 0.5, 0, Math.PI * 2); c.fill();
-    c.fillStyle = '#ffd36b';
-    c.beginPath(); c.arc(x, ay - r * 1.0, r * 0.52, Math.PI * 1.05, Math.PI * 1.95); c.fill();
-    c.strokeStyle = '#4a3a2a'; c.lineWidth = Math.max(1.3, r * 0.08);   // 웃는 눈
-    for (const sd of [-1, 1]) {
-      c.beginPath(); c.arc(x + sd * r * 0.18, ay - r * 0.82, r * 0.1, Math.PI * 1.1, Math.PI * 1.9); c.stroke();
+    c.bezierCurveTo(x - r * 0.58, ay + r * 0.36, x - r * 0.56, ay - r * 0.36, x - r * 0.24, ay - r * 0.46);
+    c.closePath();
+    c.fillStyle = robe; c.fill();
+    c.strokeStyle = INK_A; c.lineWidth = Math.max(1.2, r * 0.06); c.stroke();
+    // 옷 주름
+    c.strokeStyle = 'rgba(138,158,214,.5)'; c.lineWidth = Math.max(1, r * 0.045);
+    c.beginPath();
+    for (let i = 1; i <= 3; i++) {
+      const [hx] = hem[i];
+      c.moveTo(lerp(x, hx, 0.35), ay + r * 0.46); c.quadraticCurveTo(lerp(x, hx, 0.8), ay + r * 0.8, hx, hemY - r * 0.02);
     }
-    c.beginPath(); c.arc(x, ay - r * 0.68, r * 0.13, 0.15 * Math.PI, 0.85 * Math.PI); c.stroke();
-    // 후광
-    c.strokeStyle = '#ffd84a'; c.lineWidth = r * 0.14;
-    c.shadowColor = '#ffe680'; c.shadowBlur = 12;
-    c.beginPath(); c.ellipse(x, ay - r * 1.55, r * 0.5, r * 0.15, 0, 0, Math.PI * 2); c.stroke();
-    c.shadowBlur = 0;
+    c.stroke();
+    // 자락의 금실
+    c.strokeStyle = '#ffd35c'; c.lineWidth = r * 0.07;
+    c.beginPath();
+    c.moveTo(hem[0][0] - r * 0.03, hem[0][1] - r * 0.1);
+    for (let i = 1; i <= 4; i++) {
+      const [x0, y0] = hem[i - 1], [x1, y1] = hem[i];
+      c.quadraticCurveTo((x0 + x1) / 2, Math.max(y0, y1) + r * 0.1, x1 + (i === 4 ? r * 0.03 : 0), y1 - r * 0.1);
+    }
+    c.stroke();
+    // 금 허리띠와 나부끼는 끈
+    c.strokeStyle = '#c98a12'; c.lineWidth = r * 0.2;
+    c.beginPath(); c.moveTo(x - r * 0.5, ay + r * 0.22); c.quadraticCurveTo(x, ay + r * 0.36, x + r * 0.5, ay + r * 0.22); c.stroke();
+    c.strokeStyle = '#ffd24a'; c.lineWidth = r * 0.13;
+    c.beginPath(); c.moveTo(x - r * 0.5, ay + r * 0.22); c.quadraticCurveTo(x, ay + r * 0.36, x + r * 0.5, ay + r * 0.22); c.stroke();
+    c.lineWidth = r * 0.08;
+    c.beginPath(); c.moveTo(x + r * 0.2, ay + r * 0.32);
+    c.quadraticCurveTo(x + r * 0.3 + sway, ay + r * 0.6, x + r * 0.22 + sway * 2.2, ay + r * 0.9); c.stroke();
+    c.fillStyle = '#fff3b0';
+    c.beginPath(); c.arc(x + r * 0.2, ay + r * 0.31, r * 0.09, 0, Math.PI * 2); c.fill();
+    // 금 옷깃
+    c.strokeStyle = '#ffd24a'; c.lineWidth = r * 0.09;
+    c.beginPath(); c.moveTo(x - r * 0.24, ay - r * 0.44); c.quadraticCurveTo(x, ay - r * 0.2, x + r * 0.24, ay - r * 0.44); c.stroke();
+
+    /* --- 두 팔: 넓은 소매. 내려올 때는 아이를 붙들고, 내려놓은 뒤에는 한 손을 흔든다 --- */
+    for (const sd of [-1, 1]) {
+      const shx = x + sd * r * 0.4, shy = ay - r * 0.22;
+      const wv = sd > 0 ? wave : wave * 0.5;
+      const hx = lerp(x + sd * r * 0.82, x + sd * (sd > 0 ? r * 1.12 + Math.sin(T * 15) * r * 0.14 : r * 0.95), wv);
+      const hyy = lerp(ay + r * 1.56, sd > 0 ? ay - r * 0.72 : ay + r * 0.62, wv);
+      const cx = lerp(x + sd * r * 1.08, x + sd * r * (sd > 0 ? 1.2 : 1.0), wv), cy = lerp(ay + r * 0.6, sd > 0 ? ay + r * 0.2 : ay + r * 0.1, wv);
+      // 소매는 손목 조금 못 미쳐 끝난다 (곡선의 78% 지점까지)
+      const q = 0.78, mx1 = lerp(shx, cx, q), my1 = lerp(shy, cy, q), mx2 = lerp(cx, hx, q), my2 = lerp(cy, hyy, q);
+      const ex = lerp(mx1, mx2, q), ey = lerp(my1, my2, q);
+      c.strokeStyle = '#ffe2c4'; c.lineWidth = r * 0.17;               // 손목
+      c.beginPath(); c.moveTo(ex, ey); c.lineTo(hx, hyy); c.stroke();
+      for (const [col, w] of [[INK_A, r * 0.34 + Math.max(2, r * 0.1)], ['#f4f7ff', r * 0.34]]) {
+        c.strokeStyle = col; c.lineWidth = w;
+        c.beginPath(); c.moveTo(shx, shy); c.quadraticCurveTo(mx1, my1, ex, ey); c.stroke();
+      }
+      c.strokeStyle = '#ffd24a'; c.lineWidth = r * 0.07; c.lineCap = 'butt';   // 소매 끝 금테
+      const tdx = mx2 - mx1, tdy = my2 - my1, td = Math.hypot(tdx, tdy) || 1;
+      c.beginPath(); c.moveTo(ex - (tdy / td) * r * 0.2, ey + (tdx / td) * r * 0.2); c.lineTo(ex + (tdy / td) * r * 0.2, ey - (tdx / td) * r * 0.2); c.stroke();
+      c.lineCap = 'round';
+      c.fillStyle = '#ffe2c4'; c.strokeStyle = 'rgba(170,110,80,.6)'; c.lineWidth = Math.max(1, r * 0.04);
+      c.beginPath(); c.arc(hx, hyy, r * 0.15, 0, Math.PI * 2); c.fill(); c.stroke();
+    }
+
+    /* --- 후광의 뒤쪽 절반 (머리 뒤로 돌아간다) --- */
+    const hax = x, hay = hy - r * 0.82 + Math.sin(T * 4.2 + 1) * r * 0.03, hrx = r * 0.52, hry = r * 0.16;
+    c.strokeStyle = '#d99a10'; c.lineWidth = r * 0.12;
+    c.beginPath(); c.ellipse(hax, hay, hrx, hry, -0.06, Math.PI, Math.PI * 2); c.stroke();
+
+    /* --- 얼굴 --- */
+    const fg = c.createRadialGradient(x - r * 0.15, hy - r * 0.2, r * 0.05, x, hy, r * 0.56);
+    fg.addColorStop(0, '#fff1e2'); fg.addColorStop(1, '#ffd9b8');
+    c.fillStyle = fg;
+    c.beginPath(); c.arc(x, hy, r * 0.54, 0, Math.PI * 2); c.fill();
+    c.strokeStyle = 'rgba(170,110,80,.55)'; c.lineWidth = Math.max(1, r * 0.045); c.stroke();
+    c.fillStyle = 'rgba(255,120,145,.5)';                               // 볼
+    for (const sd of [-1, 1]) { c.beginPath(); c.ellipse(x + sd * r * 0.33, hy + r * 0.2, r * 0.11, r * 0.07, 0, 0, Math.PI * 2); c.fill(); }
+    c.strokeStyle = '#5a3a26'; c.lineWidth = Math.max(1.3, r * 0.075);  // 웃는 눈과 입
+    for (const sd of [-1, 1]) {
+      c.beginPath(); c.arc(x + sd * r * 0.21, hy + r * 0.12, r * 0.1, Math.PI * 1.08, Math.PI * 1.92); c.stroke();
+    }
+    c.beginPath(); c.arc(x, hy + r * 0.2, r * 0.1, 0.18 * Math.PI, 0.82 * Math.PI); c.stroke();
+
+    /* --- 앞머리: 이마를 덮는 세 갈래 + 윤기 --- */
+    c.fillStyle = hg; c.strokeStyle = 'rgba(176,112,24,.7)'; c.lineWidth = Math.max(1, r * 0.05);
+    c.beginPath();
+    c.moveTo(x - r * 0.58, hy + r * 0.02);
+    c.bezierCurveTo(x - r * 0.64, hy - r * 0.76, x + r * 0.64, hy - r * 0.76, x + r * 0.58, hy + r * 0.02);
+    c.quadraticCurveTo(x + r * 0.42, hy - r * 0.02, x + r * 0.3, hy - r * 0.2);
+    c.quadraticCurveTo(x + r * 0.18, hy + r * 0.02, x + r * 0.02, hy - r * 0.18);
+    c.quadraticCurveTo(x - r * 0.16, hy + r * 0.02, x - r * 0.3, hy - r * 0.18);
+    c.quadraticCurveTo(x - r * 0.44, hy - r * 0.02, x - r * 0.58, hy + r * 0.02);
+    c.closePath(); c.fill(); c.stroke();
+    c.strokeStyle = 'rgba(255,255,255,.75)'; c.lineWidth = r * 0.07;
+    c.beginPath(); c.arc(x, hy - r * 0.02, r * 0.4, Math.PI * 1.22, Math.PI * 1.52); c.stroke();
+
+    /* --- 후광의 앞쪽 절반 + 빛 + 반짝이 --- */
+    c.globalCompositeOperation = 'lighter';
+    const hgl = c.createRadialGradient(hax, hay, r * 0.1, hax, hay, r * 1.1);
+    hgl.addColorStop(0, 'rgba(255,225,120,.4)'); hgl.addColorStop(1, 'rgba(255,225,120,0)');
+    c.fillStyle = hgl;
+    c.beginPath(); c.arc(hax, hay, r * 1.1, 0, Math.PI * 2); c.fill();
+    c.globalCompositeOperation = 'source-over';
+    c.strokeStyle = '#e8a814'; c.lineWidth = r * 0.16;
+    c.beginPath(); c.ellipse(hax, hay, hrx, hry, -0.06, 0, Math.PI); c.stroke();
+    c.strokeStyle = '#ffdf5a'; c.lineWidth = r * 0.1;
+    c.beginPath(); c.ellipse(hax, hay, hrx, hry, -0.06, 0, Math.PI * 2); c.stroke();
+    c.strokeStyle = '#fffbe0'; c.lineWidth = r * 0.035;
+    c.beginPath(); c.ellipse(hax, hay - r * 0.012, hrx, hry, -0.06, Math.PI * 0.15, Math.PI * 0.85); c.stroke();
+    c.fillStyle = '#fffbe0';
+    star4(c, hax + hrx * 0.92, hay - r * 0.05, r * 0.2 * (0.6 + 0.4 * Math.sin(T * 9)));
+
+    /* --- 빛기둥을 타고 흩날리는 반짝이와 깃털 --- */
+    for (let i = 0; i < 9; i++) {
+      const p = (T * 0.32 + i * 0.137) % 1, o = Math.sin(i * 12.9898) * 43758.5453;
+      const sx = x + ((o - Math.floor(o)) - 0.5) * 2 * lerp(r * 1.2, r * 2.6, p);
+      const s = r * 0.2 * Math.sin(Math.PI * p) * (0.55 + 0.45 * Math.sin(T * 10 + i * 2.4));
+      if (s <= 0.5) continue;
+      c.fillStyle = i % 3 ? '#fff6c8' : '#ffffff';
+      star4(c, sx, p * by, s);
+    }
+    for (let i = 0; i < 4; i++) {
+      const p = (T * 0.2 + i * 0.27) % 1;
+      const fx = x + Math.sin(p * 7 + i * 2.1) * r * 1.5 + (i - 1.5) * r * 0.5, fy = lerp(ay - r * 0.5, by, p);
+      c.save();
+      c.globalAlpha = alpha * Math.sin(Math.PI * p) * 0.9;
+      c.translate(fx, fy); c.rotate(Math.cos(p * 7 + i * 2.1) * 0.9 + 0.5);
+      c.fillStyle = '#ffffff'; c.strokeStyle = 'rgba(122,142,204,.6)'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(-r * 0.24, 0); c.quadraticCurveTo(0, -r * 0.16, r * 0.26, 0); c.quadraticCurveTo(0, r * 0.13, -r * 0.24, 0);
+      c.fill(); c.stroke();
+      c.beginPath(); c.moveTo(-r * 0.2, 0); c.lineTo(r * 0.22, 0); c.stroke();
+      c.restore();
+    }
     c.restore();
   }
 
